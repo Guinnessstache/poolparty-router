@@ -175,6 +175,11 @@ fn describe(app: App, running: bool, bridge: Option<bool>, claude: Option<&str>)
         App::Unity => "Add the Unity Pipeline package to the project once: unity pipeline install.",
     };
     match (running, bridge, claude) {
+        (true, Some(false), None) => (
+            "Open, but its MCP server isn't running and it isn't connected to Claude Code yet".into(),
+            "wait",
+            Some(format!("{start_hint} Then press Connect.")),
+        ),
         (_, _, None) => (
             "Not connected to Claude Code yet".into(),
             if running { "wait" } else { "off" },

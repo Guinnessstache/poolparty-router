@@ -1199,7 +1199,8 @@ async fn connect_app(app: &App, cl: &std::path::Path, which: apps::App, cfg: &Co
             claude::add_server(cl, "unity", &json!({"type": "stdio", "command": "unity", "args": ["mcp"]})).await?;
             Ok("Added Unity to Claude Code (through the Unity command-line tool). Open a project with the Pipeline package to connect.".into())
         }
-        apps::App::Blender => Err("Blender connects through its MCP add-on plus a small bridge program that isn't set up yet. Add Blender in the Claude desktop app (Settings > Connectors) or follow blender.org/lab/mcp-server, then press Connect again and it will be copied into Claude Code.".into()),
+        apps::App::Blender => Err(format!("Couldn't find Blender in the Claude desktop app's settings (looked in {} place{}). Blender connects through its MCP add-on plus a small bridge program.",
+            claude::desktop_dirs().len().max(1), if claude::desktop_dirs().len() == 1 { "" } else { "s" }) + " Add Blender in the Claude desktop app (Settings > Connectors) or follow blender.org/lab/mcp-server, then press Connect again and it will be copied into Claude Code."),
     }
 }
 

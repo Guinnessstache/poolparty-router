@@ -47,14 +47,29 @@ pub fn find(configured: &str) -> Option<PathBuf> {
 /// through PowerShell with every argument single-quoted. `stdin_file`, if
 /// given, is piped in as the prompt.
 pub fn command(claude: &Path, args: &[String], stdin_file: Option<&Path>) -> Command {
+    // npm's claude.cmd just starts the real program; run that directly so
+    // arguments (like JSON) arrive exactly as written.
+    if let Some((prog, pre)) = npm_target(claude) {
+        let mut c = Command::new(prog);
+        c.args(pre).args(args);
+        match stdin_file.and_then(|f| std::fs::File::open(f).ok()) {
+            Some(f) => c.stdin(Stdio::from(f)),
+            None => c.stdin(Stdio::null()),
+        };
+        sys::quiet(&mut c);
+        return c;
+    }
     let script_like = claude
         .extension()
         .map(|e| matches!(e.to_string_lossy().to_lowercase().as_str(), "cmd" | "bat" | "ps1"))
         .unwrap_or(false);
     if cfg!(windows) && script_like {
         let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        // Windows PowerShell 5.1 drops embedded double quotes when it passes
+        // arguments to programs, so escape them the way the program expects.
+        let qa = |s: &str| q(&msvc_escape_quotes(s));
         let mut script = String::from(
-            "$ErrorActionPreference='Continue'; $u=New-Object Text.UTF8Encoding $false; \
+            "$ErrorActionPreference='Continue'; $ProgressPreference='SilentlyContinue'; $u=New-Object Text.UTF8Encoding $false; \
              [Console]::OutputEncoding=$u; $OutputEncoding=$u; ",
         );
         if let Some(f) = stdin_file {
@@ -63,7 +78,7 @@ pub fn command(claude: &Path, args: &[String], stdin_file: Option<&Path>) -> Com
         script.push_str(&format!("& {}", q(&claude.display().to_string())));
         for a in args {
             script.push(' ');
-            script.push_str(&q(a));
+            script.push_str(&qa(a));
         }
         script.push_str("; exit $LASTEXITCODE");
         let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
@@ -88,6 +103,70 @@ pub fn command(claude: &Path, args: &[String], stdin_file: Option<&Path>) -> Com
     c
 }
 
+/// For npm's claude.cmd shim: the program it really runs (a bundled .exe, or
+/// node with cli.js) plus any leading arguments.
+fn npm_target(claude: &Path) -> Option<(PathBuf, Vec<String>)> {
+    let ext = claude.extension()?.to_string_lossy().to_lowercase();
+    if ext != "cmd" && ext != "bat" && ext != "ps1" {
+        return None;
+    }
+    let pkg = claude.parent()?.join("node_modules").join("@anthropic-ai").join("claude-code");
+    for exe in ["bin/claude.exe", "claude.exe", "bin/claude"] {
+        let p = pkg.join(exe);
+        if p.is_file() {
+            return Some((p, Vec::new()));
+        }
+    }
+    let cli = pkg.join("cli.js");
+    if cli.is_file() {
+        let local_node = claude.parent()?.join("node.exe");
+        let node = if local_node.is_file() { local_node } else { PathBuf::from("node") };
+        return Some((node, vec![cli.display().to_string()]));
+    }
+    None
+}
+
+/// Escape double quotes for a Windows program's argument parser: backslashes
+/// right before a quote are doubled, then the quote gets its own backslash.
+fn msvc_escape_quotes(s: &str) -> String {
+    let mut out = String::new();
+    let mut slashes = 0;
+    for c in s.chars() {
+        match c {
+            '\\' => slashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+                continue;
+            }
+            _ => {}
+        }
+        if c != '\\' {
+            out.push_str(&"\\".repeat(slashes));
+            slashes = 0;
+            out.push(c);
+        }
+    }
+    out.push_str(&"\\".repeat(slashes));
+    out
+}
+
+/// Drop PowerShell's serialized progress records (#< CLIXML ... </Objs>).
+pub fn clean_output(t: &str) -> String {
+    let mut out = String::new();
+    let mut rest = t;
+    while let Some(i) = rest.find("<Objs") {
+        out.push_str(&rest[..i]);
+        rest = match rest[i..].find("</Objs>") {
+            Some(j) => &rest[i + j + 7..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out.lines().filter(|l| !l.trim_start().starts_with("#< CLIXML")).collect::<Vec<_>>().join("\n")
+}
+
 /// Run `claude <args>` to completion with a time limit. Returns (exit ok, stdout).
 pub async fn run(claude: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), String> {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -101,9 +180,10 @@ pub async fn run(claude: &Path, args: &[&str], timeout: Duration) -> Result<(boo
         .map_err(|e| format!("couldn't run Claude Code: {e}"))?;
     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
     if !out.status.success() {
+        text.push('\n');
         text.push_str(&String::from_utf8_lossy(&out.stderr));
     }
-    Ok((out.status.success(), text))
+    Ok((out.status.success(), clean_output(&text)))
 }
 
 // ------------------------------------------------------------ status
@@ -196,30 +276,52 @@ pub async fn add_server(claude: &Path, name: &str, json: &serde_json::Value) -> 
     if ok {
         Ok(())
     } else {
-        Err(text.trim().lines().last().unwrap_or("claude mcp add-json failed").to_string())
+        let msg: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let tail = msg[msg.len().saturating_sub(3)..].join(" ");
+        Err(if tail.is_empty() { "Claude Code couldn't add the connection.".into() } else { format!("Claude Code said: {tail}") })
     }
 }
 
-fn desktop_dir() -> PathBuf {
+/// Where the Claude desktop app keeps its settings. The Microsoft Store
+/// version's folder is redirected under LocalAppData\Packages.
+pub fn desktop_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
     if let Some(a) = std::env::var_os("APPDATA") {
-        PathBuf::from(a).join("Claude")
-    } else {
-        sys::home().join("Library/Application Support/Claude")
+        dirs.push(PathBuf::from(a).join("Claude"));
     }
+    if let Some(l) = std::env::var_os("LOCALAPPDATA") {
+        if let Ok(rd) = std::fs::read_dir(PathBuf::from(l).join("Packages")) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_lowercase();
+                if n.starts_with("claude") || n.contains("anthropic") {
+                    dirs.push(e.path().join("LocalCache").join("Roaming").join("Claude"));
+                }
+            }
+        }
+    }
+    dirs.push(sys::home().join("Library/Application Support/Claude"));
+    dirs.into_iter().filter(|d| d.is_dir()).collect()
 }
 
 /// MCP servers the Claude desktop app has: entries in claude_desktop_config.json
 /// plus installed desktop extensions (Settings > Extensions/Connectors).
 /// Values stay on this PC: they're only copied into Claude Code's settings.
 pub fn desktop_servers() -> Vec<(String, serde_json::Value)> {
-    let dir = desktop_dir();
+    let mut out = Vec::new();
+    for dir in desktop_dirs() {
+        out.extend(desktop_servers_in(&dir));
+    }
+    out
+}
+
+fn desktop_servers_in(dir: &Path) -> Vec<(String, serde_json::Value)> {
     let mut out: Vec<(String, serde_json::Value)> = std::fs::read_to_string(dir.join("claude_desktop_config.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|v| v["mcpServers"].as_object().cloned())
         .map(|m| m.into_iter().collect())
         .unwrap_or_default();
-    out.extend(desktop_extensions(&dir));
+    out.extend(desktop_extensions(dir));
     out
 }
 
@@ -346,6 +448,19 @@ mod tests {
         assert_eq!(e["command"], "uvx");
         assert_eq!(e["args"], serde_json::json!(["/ext/b/server.py", "--port", "9876"]));
         assert_eq!(e["env"]["BLENDER_HOST"], "127.0.0.1");
+    }
+
+    #[test]
+    fn escapes_quotes_for_windows_programs() {
+        assert_eq!(msvc_escape_quotes(r#"{"a":"b"}"#), r#"{\"a\":\"b\"}"#);
+        assert_eq!(msvc_escape_quotes(r#"{"p":"C:\\x\\"}"#), r#"{\"p\":\"C:\\x\\\\\"}"#);
+        assert_eq!(msvc_escape_quotes(r"a\b"), r"a\b");
+    }
+
+    #[test]
+    fn strips_powershell_progress() {
+        let t = "#< CLIXML\n<Objs Version=\"1.1.0.1\"><Obj S=\"progress\">x</Obj></Objs>\nError: Invalid JSON";
+        assert_eq!(clean_output(t).trim(), "Error: Invalid JSON");
     }
 
     #[test]
