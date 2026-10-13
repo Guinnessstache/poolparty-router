@@ -193,7 +193,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for UiLayer {
         let target = meta.target();
         // Only our own crate and the model's output; skip HTTP library noise.
         let source = match target {
-            "model" | "request" | "handoff" | "router" => target.to_string(),
+            "model" | "request" | "handoff" | "router" | "claude" | "apps" => target.to_string(),
             t if t.starts_with("poolparty_router") => "router".to_string(),
             _ => return,
         };

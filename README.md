@@ -1,9 +1,10 @@
 # PoolParty Router
 
-**One address for all your local AI.** PoolParty Router sits between your coding
-tools and the machines that run your models. Each request goes to the right
-machine on its own, and when a local model gets stuck it hands the job to Claude
-Code.
+**Claude plans, your Mac codes, your PC runs the engines.** PoolParty Router
+connects Claude Code, a big-memory machine and your PC's graphics card. Claude
+Code writes a blueprint for each feature, the coding agent on the Mac builds it
+through the router, and your GPU stays free for Unreal, Unity and Blender, with a
+status light for each showing whether it's connected to Claude.
 
 ![PoolParty Router showing live traffic between a PC, its GPU, a Mac Studio and Claude Code](docs/img/app.png)
 
@@ -13,10 +14,21 @@ Code.
 
 | Machine | Typically | Gets |
 | --- | --- | --- |
-| **This PC** | A gaming GPU (e.g. RTX 4070 Ti) running a small model | Tab completion, quick chats |
-| **Remote machine** | A big-memory box (e.g. Mac Studio) running a large model | Coding agents, long chats, images |
-| **Claude Code** | Your Claude Pro or Max plan | Sessions where the local model is stuck |
+| **Claude Code** (the architect) | Your Claude Pro or Max plan | Blueprints for each feature; sessions where the local model is stuck |
+| **Remote machine** (writes the code) | A big-memory box (e.g. Mac Studio) running a large model | Coding agents, long chats, images |
+| **This PC** (runs the engines) | A gaming GPU (e.g. RTX 4070 Ti) | Unreal, Unity and Blender; a small model for tab completion when they're closed |
 
+- **Plan with Claude:** pick a project folder, describe a feature, and Claude Code
+  reads the project and writes `BLUEPRINT.md` (goal, how it fits, build steps,
+  engine notes, risks). The app also points OpenCode in that folder at the router
+  and gives you the instructions to paste so the Mac builds it step by step.
+- **Engine and 3D app lights:** Unreal, Unity and Blender each show whether they're
+  open, whether their MCP server is running, and whether Claude Code is connected.
+  **Connect** adds them to Claude Code (copying the setup from the Claude desktop
+  app when it has one), and **Set up a project** makes an Unreal project start its
+  MCP server on its own.
+- **GPU hand-back:** while an engine is open, this PC's model pauses so the engine
+  gets the whole GPU, and restarts when they close.
 - **Status lights and plain-English status** for every machine.
 - **One-click model control:** the app finds your GPU, `llama-server` and the
   models already on your PC, shows which ones fit, and starts or stops the model for you.
@@ -38,7 +50,9 @@ Code.
    `llama-server`, it tells you where to get it.
 3. Optional: under **Mac Studio**, press **Set up**, type the machine's name or IP
    address, press **Test**, then **Save**.
-4. Copy the address from **Connect your coding tools** into OpenCode, Pi, Continue,
+4. Under **Game engines and 3D apps**, press **Connect** next to each app you use.
+   Claude Code must be installed and signed in once (run `claude` in a terminal).
+5. Copy the address from **Connect your coding tools** into OpenCode, Pi, Continue,
    Kilo Code or Unsloth Studio and choose the model **auto**. The app shows a
    ready-to-paste config for each.
 
@@ -53,6 +67,17 @@ On the Mac: `brew install llama.cpp`, copy the `mac` folder from the zip over, a
 It raises macOS's GPU memory limit (to 112 GB on a 128 GB Mac) at every boot,
 starts `llama-server` at login with a password, and prints the address and
 password to type into the app. `mac/uninstall-mac.sh` undoes it.
+
+## Planning a feature
+
+1. In **Plan a feature with Claude**, choose the project folder and describe the
+   feature in a sentence or two. Pick **Opus** for the hardest designs.
+2. Claude Code runs read-only in that folder (it can read and search files and the
+   web, but not change anything) and the steps appear live.
+3. The result is saved as `BLUEPRINT.md` (the previous one is kept as
+   `BLUEPRINT.previous.md`).
+4. Open OpenCode in the project, paste **Copy build instructions**, and the
+   coding agent on the Mac works through the build steps.
 
 ## How requests are routed
 
@@ -117,6 +142,10 @@ start programs or open folders only work from the PC itself unless `api_key` is 
 | `GET /router/events` | Live Server-Sent Events: log lines, traffic ticks, requests, handoffs |
 | `POST /router/escalate` | Hand off a session (`{"session": "<id>"}`, or the latest) |
 | `POST /router/mode` | `{"paused": true}` pauses handoffs |
+| `GET /router/claude`, `POST /router/claude/refresh` | Claude Code status, its MCP connections, and the app lights |
+| `POST /router/apps/connect` | `{"app": "unreal" \| "unity" \| "blender"}` adds the app to Claude Code |
+| `POST /router/apps/unreal-setup` | `{"project": "<folder>"}` enables Unreal's MCP plugins and auto-start |
+| `GET/POST /router/blueprint`, `POST /router/blueprint/cancel` | Write a blueprint with Claude Code and follow its progress |
 
 ## Building from source
 

@@ -25,6 +25,7 @@ context = 16384
 port = 8081
 gpu_layers = 99
 autostart = true
+pause_for_apps = true   # free the GPU while Unreal, Unity or Blender is open
 
 [escalation]
 # "handoff": when a session is stuck, write a brief and tell you to continue
@@ -33,3 +34,11 @@ autostart = true
 mode = "handoff"
 strikes_to_escalate = 3
 summarize_with_local_model = true
+
+[claude]
+command = ""            # empty = find Claude Code automatically
+blueprint_model = ""    # "" = your Claude Code default; "opus" = most capable
+
+[apps]
+unreal_url = "http://127.0.0.1:8000/mcp"   # Unreal's ModelContextProtocol plugin
+blender_port = 9876                         # Blender's MCP add-on

@@ -94,6 +94,7 @@ button, input, select { font: inherit; color: inherit; }
 .field { display: grid; gap: 4px; margin-bottom: 10px; }
 .field label { font-size: 13.5px; font-weight: 600; }
 .field .hint { font-size: 12.5px; color: var(--quiet); }
+textarea { border: 1.5px solid var(--line); background: var(--panel); border-radius: var(--r-sm); padding: 9px 11px; width: 100%; resize: vertical; min-height: 84px; line-height: 1.45; }
 input[type=text], input[type=password], select { border: 1.5px solid var(--line); background: var(--panel); border-radius: var(--r-sm); padding: 8px 11px; width: 100%; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .result { margin-top: 8px; font-size: 14px; }
@@ -114,6 +115,25 @@ input[type=text], input[type=password], select { border: 1.5px solid var(--line)
 .dots { display: inline-flex; gap: 3px; }
 .dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
 .dots i.hit { background: var(--wait); }
+
+/* ---------- architect + apps ---------- */
+.role { display: inline-block; font-size: 12.5px; font-weight: 650; color: var(--deep); background: var(--pool-soft); border-radius: 999px; padding: 1px 9px; margin-left: 8px; vertical-align: 2px; }
+.steps { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 13.5px; color: var(--quiet); max-height: 170px; overflow: auto; }
+.steps li { display: flex; gap: 8px; }
+.steps li::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--pool); margin-top: 8px; flex: none; }
+.steps li:last-child { color: var(--ink); font-weight: 600; }
+.apps { display: grid; gap: 0; }
+.app { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 4px 14px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
+.app:first-of-type { border-top: 0; }
+.app .light { width: 12px; height: 12px; }
+.app b { font-size: 15.5px; }
+.app .sum { font-size: 14px; }
+.app .hint { grid-column: 2 / -1; font-size: 13px; color: var(--quiet); }
+.app .hint code { font: 12.5px var(--mono); background: var(--tile); padding: 1px 5px; border-radius: 5px; word-break: break-all; }
+.app .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.app .result { grid-column: 2 / -1; margin: 0; }
+.claude-note { display: flex; gap: 10px; align-items: center; font-size: 13.5px; color: var(--quiet); margin-bottom: 4px; }
+.app-pill { font: 650 13.5px var(--font); fill: var(--ink); }
 
 /* ---------- connect + log ---------- */
 .grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 18px; margin-top: 18px; align-items: start; }
@@ -136,7 +156,7 @@ pre { margin: 0; background: var(--tile); border-radius: var(--r-sm); padding: 1
 .log div { display: grid; grid-template-columns: 62px 64px 1fr; gap: 8px; }
 .log .t { color: var(--quiet); }
 .log .s { font-weight: 600; }
-.log .src-router { color: var(--deep); } .log .src-model { color: var(--quiet); } .log .src-request { color: var(--pool); } .log .src-handoff { color: var(--rope-a); }
+.log .src-router { color: var(--deep); } .log .src-model { color: var(--quiet); } .log .src-request { color: var(--pool); } .log .src-handoff { color: var(--rope-a); } .log .src-claude { color: var(--rope-a); } .log .src-apps { color: var(--good); }
 .log .m { white-space: pre-wrap; word-break: break-word; }
 .log .warn .m { color: #a8730a; } .log .error .m { color: var(--bad); }
 .log .empty { display: block; color: var(--quiet); padding: 6px 0; font-family: var(--font); }
@@ -173,8 +193,8 @@ pre { margin: 0; background: var(--tile); border-radius: var(--r-sm); padding: 1
 
   <section class="map" aria-label="Live map of your machines">
     <span class="caption">Live traffic</span>
-    <span class="legend"><span><i style="background:var(--deep)"></i>request</span><span><i style="background:var(--pool)"></i>answer flowing back</span><span><i style="background:var(--rope-a)"></i>handoff</span></span>
-    <svg viewBox="0 0 1000 400" id="mapSvg" role="img" aria-label="This PC and its GPU, the router, the remote machine and Claude Code, with live traffic between them">
+    <span class="legend"><span><i style="background:var(--deep)"></i>request</span><span><i style="background:var(--pool)"></i>answer flowing back</span><span><i style="background:var(--rope-a)"></i>Claude planning or taking over</span></span>
+    <svg viewBox="0 0 1000 400" id="mapSvg" role="img" aria-label="This PC and its GPU, the game engines and 3D apps, the router, the remote machine and Claude Code, with live traffic between them">
       <defs>
         <symbol id="i-pc" viewBox="0 0 64 64"><rect x="16" y="4" width="32" height="56" rx="5" fill="var(--panel)" stroke="var(--ink)" stroke-width="3"/><circle cx="32" cy="16" r="3.5" fill="var(--ink)"/><rect x="23" y="27" width="18" height="3" rx="1.5" fill="var(--ink)"/><rect x="23" y="34" width="18" height="3" rx="1.5" fill="var(--ink)"/><rect x="23" y="41" width="18" height="3" rx="1.5" fill="var(--ink)"/></symbol>
         <symbol id="i-gpu" viewBox="0 0 64 40"><rect x="2" y="4" width="60" height="26" rx="4" fill="var(--panel)" stroke="var(--ink)" stroke-width="3"/><circle cx="20" cy="17" r="8" fill="none" stroke="var(--ink)" stroke-width="3"/><circle cx="44" cy="17" r="8" fill="none" stroke="var(--ink)" stroke-width="3"/><rect x="8" y="30" width="28" height="6" fill="var(--ink)"/></symbol>
@@ -187,10 +207,20 @@ pre { margin: 0; background: var(--tile); border-radius: var(--r-sm); padding: 1
       <path id="ch-remote" class="channel" d="M534 200 C 620 200, 660 120, 760 120"/>
       <path id="ch-claude" class="channel" d="M534 200 C 620 200, 660 300, 760 300"/>
       <path id="ch-gpu" class="channel" d="M160 240 L 160 276"/>
+      <path id="ch-tray" class="channel" d="M204 304 C 236 304, 238 357, 268 357"/>
+      <path id="ch-apps" class="channel" d="M700 357 C 744 357, 768 336, 800 322"/>
       <path id="cc-local" class="channel-core" d="M210 190 C 320 190, 380 200, 466 200"/>
       <path id="cc-remote" class="channel-core off" d="M534 200 C 620 200, 660 120, 760 120"/>
       <path id="cc-claude" class="channel-core" d="M534 200 C 620 200, 660 300, 760 300"/>
       <path id="cc-gpu" class="channel-core" d="M160 240 L 160 276"/>
+      <path id="cc-tray" class="channel-core off" d="M204 304 C 236 304, 238 357, 268 357"/>
+      <path id="cc-apps" class="channel-core off" d="M700 357 C 744 357, 768 336, 800 322"/>
+      <g id="n-apps">
+        <rect x="262" y="333" width="444" height="48" rx="24" fill="var(--panel)" stroke="var(--line)" stroke-width="1.5"/>
+        <circle id="ap-unreal" cx="298" cy="357" r="7" fill="var(--off)"/><text class="app-pill" x="312" y="362">Unreal</text>
+        <circle id="ap-unity" cx="446" cy="357" r="7" fill="var(--off)"/><text class="app-pill" x="460" y="362">Unity</text>
+        <circle id="ap-blender" cx="580" cy="357" r="7" fill="var(--off)"/><text class="app-pill" x="594" y="362">Blender</text>
+      </g>
       <g id="bubbles"></g>
 
       <g id="n-local">
@@ -218,7 +248,7 @@ pre { margin: 0; background: var(--tile); border-radius: var(--r-sm); padding: 1
         <use href="#i-cloud" x="760" y="252" width="96" height="96"/>
         <circle id="lt-claude" cx="846" cy="282" r="8" fill="var(--off)" stroke="var(--panel)" stroke-width="3"/>
         <text class="node-label" x="868" y="296">Claude Code</text>
-        <text class="node-sub" x="868" y="315" id="sub-claude">for stuck sessions</text>
+        <text class="node-sub" x="868" y="315" id="sub-claude">architect</text>
       </g>
       <text class="flow-num" x="335" y="172" text-anchor="middle" id="f-local">idle</text>
       <text class="flow-sub" x="335" y="226" text-anchor="middle" id="fs-local"></text>
@@ -231,7 +261,7 @@ pre { margin: 0; background: var(--tile); border-radius: var(--r-sm); padding: 1
   <section class="lanes" aria-label="Your machines">
     <div class="lane" id="lane-local">
       <span class="light" id="ll-local"></span>
-      <div><h3 id="ln-local">This PC</h3><div class="what">Runs a model on your graphics card. Quick jobs and tab completion.</div></div>
+      <div><h3><span id="ln-local">This PC</span><span class="role">runs the engines</span></h3><div class="what">Your graphics card runs Unreal, Unity and Blender. When they're closed, a small model handles tab completion.</div></div>
       <div class="state-col"><div class="state" id="ls-local">Checking…</div><div class="stats" id="lx-local"></div></div>
       <div class="actions">
         <button class="btn go big" id="startBtn">Start</button>
@@ -260,7 +290,7 @@ pre { margin: 0; background: var(--tile); border-radius: var(--r-sm); padding: 1
 
     <div class="lane" id="lane-remote">
       <span class="light" id="ll-remote"></span>
-      <div><h3 id="ln-remote">Mac Studio</h3><div class="what">Your big-memory machine. Runs the large model for coding agents.</div></div>
+      <div><h3><span id="ln-remote">Mac Studio</span><span class="role">writes the code</span></h3><div class="what">Runs the large model your coding agent uses to build each blueprint, step by step.</div></div>
       <div class="state-col"><div class="state" id="ls-remote">Not set up yet</div><div class="stats" id="lx-remote"></div></div>
       <div class="actions">
         <button class="btn" id="testRemote">Test</button>
@@ -281,14 +311,51 @@ pre { margin: 0; background: var(--tile); border-radius: var(--r-sm); padding: 1
 
     <div class="lane" id="lane-claude">
       <span class="light" id="ll-claude"></span>
-      <div><h3>Claude Code</h3><div class="what">Takes over when a local model gets stuck. Uses your Claude plan.</div></div>
+      <div><h3>Claude Code<span class="role">the architect</span></h3><div class="what">Plans each feature as a blueprint, and takes over when a local model gets stuck. Uses your Claude plan.</div></div>
       <div class="state-col"><div class="state" id="ls-claude"></div><div class="stats" id="lx-claude"></div></div>
       <div class="actions">
         <label class="switch"><input type="checkbox" id="handoffSwitch" checked> Hand off stuck sessions</label>
+        <button class="btn main" id="planJump">Plan a feature</button>
       </div>
       <div class="more gone" id="claudeMore"></div>
     </div>
   </section>
+
+  <div class="grid2">
+    <section class="box" aria-labelledby="planH" id="planBox">
+      <h2 id="planH">Plan a feature with Claude</h2>
+      <p>Claude reads your project and writes a step-by-step blueprint. Your coding agent on the Mac then builds it.</p>
+      <div id="planForm">
+        <div class="field"><label for="planProject">Project folder</label>
+          <div class="endpoint"><input type="text" id="planProject" placeholder="C:\Projects\MyGame" autocomplete="off"><button class="btn" id="planBrowse">Browse</button></div></div>
+        <div class="field"><label for="planIdea">What should it do?</label>
+          <textarea id="planIdea" placeholder="A double jump with a short cooldown, shown on the HUD. It should feel snappy on a controller."></textarea></div>
+        <div class="row">
+          <label for="planModel" style="font-size:14px;font-weight:600">Claude model</label>
+          <select id="planModel" style="width:auto"><option value="">Your usual model</option><option value="opus">Opus (most capable, uses more of your plan)</option></select>
+          <span style="flex:1"></span>
+          <button class="btn main" id="planStart">Write the blueprint</button>
+        </div>
+      </div>
+      <div class="gone" id="planRun">
+        <div class="row"><span class="light wait" id="planLight"></span><b id="planState" style="flex:1">Claude is reading your project…</b><button class="btn" id="planCancel">Cancel</button></div>
+        <ul class="steps" id="planSteps"></ul>
+        <div class="row gone" id="planDone" style="margin-top:12px">
+          <button class="btn main" id="planOpen">Open the blueprint</button>
+          <button class="btn" id="planCopy">Copy build instructions</button>
+          <button class="btn" id="planAgain">Plan another</button>
+        </div>
+        <div class="result" id="planNote"></div>
+      </div>
+    </section>
+
+    <section class="box" aria-labelledby="appsH">
+      <div class="log-head"><h2 id="appsH">Game engines and 3D apps</h2><button class="btn" id="appsCheck">Check again</button></div>
+      <p>Green means the app is open and Claude Code can work in it.</p>
+      <div class="claude-note" id="claudeNote"></div>
+      <div class="apps" id="appList"></div>
+    </section>
+  </div>
 
   <div class="grid2">
     <section class="box" aria-labelledby="connectH">
@@ -307,6 +374,8 @@ pre { margin: 0; background: var(--tile); border-radius: var(--r-sm); padding: 1
           <button aria-pressed="true" data-f="all">Everything</button>
           <button aria-pressed="false" data-f="request">Requests</button>
           <button aria-pressed="false" data-f="model">Model output</button>
+          <button aria-pressed="false" data-f="claude">Claude</button>
+          <button aria-pressed="false" data-f="apps">Apps</button>
           <button aria-pressed="false" data-f="handoff">Handoffs</button>
           <button aria-pressed="false" data-f="problem">Problems</button>
         </div>
@@ -361,6 +430,8 @@ function nodesOf(L) { return Object.fromEntries((L.nodes || []).map(n => [n.id, 
 function localState(L) {
   const m = L.model || {}, node = nodesOf(L).local || {};
   const ext = S.setup?.local?.external_url;
+  const pf = L.model_paused_for || [];
+  if (pf.length && !ext) return ["off", `Paused while ${pf.join(" and ")} ${pf.length > 1 ? "are" : "is"} open`, "The model starts again on its own when they close, so the apps get the whole GPU."];
   if (ext) return node.online ? ["good", "Ready", node.model] : ["bad", "Can't reach " + ext, node.last_error];
   switch (m.state) {
     case "not_set_up": return ["off", "Choose a model to get started", null];
@@ -378,8 +449,15 @@ function remoteState(L) {
   return ["bad", "Not reachable", n.last_error];
 }
 function claudeState(L) {
-  if (L.paused) return ["wait", "Handoffs are paused", "Stuck sessions keep trying on your own machines."];
-  return ["good", "Ready to take over", L.sessions_with_strikes ? `${L.sessions_with_strikes} session${L.sessions_with_strikes > 1 ? "s are" : " is"} struggling` : "No session is stuck"];
+  const c = L.claude || {}, p = L.planner || {};
+  if (c.checked == null && !c.installed && !c.error) return ["wait", "Checking Claude Code…", null];
+  if (!c.installed) return ["bad", "Claude Code isn't installed", "Install it from claude.com/claude-code, then open a terminal and run claude once to sign in."];
+  if (c.signed_in === false) return ["bad", "Claude Code isn't signed in", "Open a terminal, run claude, and sign in with your Claude account."];
+  if (p.state === "running") return ["good", "Writing a blueprint…", p.steps?.length ? p.steps[p.steps.length - 1] : null];
+  const stuck = L.sessions_with_strikes ? `${L.sessions_with_strikes} coding session${L.sessions_with_strikes > 1 ? "s are" : " is"} struggling` : "";
+  const ver = c.version ? `Claude Code ${c.version}` : "";
+  const more = [ver, stuck, L.paused ? "handoffs paused" : ""].filter(Boolean).join(", ");
+  return ["good", "Ready to plan", more];
 }
 function overall(L) {
   const [ls] = localState(L), [rs] = remoteState(L);
@@ -440,8 +518,10 @@ function renderLive(L) {
   $("sub-remote").textContent = rn.configured ? (rn.online ? (short(rn.model) || "connected") : "not reachable") : "not set up";
 
   $("handoffSwitch").checked = !L.paused;
-  $("sub-claude").textContent = L.paused ? "handoffs paused" : "for stuck sessions";
-  $("cc-claude").setAttribute("class", "channel-core" + (L.paused ? " off" : ""));
+  const cs = cl[0], planning = L.planner?.state === "running";
+  $("sub-claude").textContent = cs === "bad" ? "needs setup" : planning ? "planning…" : "architect";
+  $("cc-claude").setAttribute("class", "channel-core" + (cs === "bad" ? " off" : planning ? " live" : ""));
+  renderApps(L); renderPlan(L.planner);
 
   const tr = L.traffic || {};
   for (const id of ["local", "remote"]) {
@@ -453,7 +533,7 @@ function renderLive(L) {
     $("cc-" + id).setAttribute("class", "channel-core" + (up ? (tr[id]?.in_flight || tr[id]?.tokens_per_sec ? " live" : "") : " off"));
   }
   $("cc-gpu").setAttribute("class", "channel-core" + (loc[0] === "good" ? (tr.local?.tokens_per_sec ? " live" : "") : " off"));
-  $("f-claude").textContent = tr.claude?.requests ? `${tr.claude.requests} handed off` : "";
+  $("f-claude").textContent = planning ? "planning" : (tr.claude?.requests ? `${tr.claude.requests} handed off` : "");
 
   const g = L.gpu;
   if (g) {
@@ -463,7 +543,7 @@ function renderLive(L) {
   }
   $("uptime").textContent = L.uptime_secs != null ? "Router running for " + fmtDur(L.uptime_secs) : "";
   rates = { local: tr.local?.tokens_per_sec || 0, remote: tr.remote?.tokens_per_sec || 0,
-            localBusy: tr.local?.in_flight || 0, remoteBusy: tr.remote?.in_flight || 0 };
+            localBusy: tr.local?.in_flight || 0, remoteBusy: tr.remote?.in_flight || 0, planning };
 }
 
 // ------------------------------------------------------------ Claude lane details
@@ -489,6 +569,102 @@ function renderClaude() {
   box.querySelectorAll("[data-esc]").forEach(b => b.onclick = async () => {
     await api("/router/escalate", { session: b.dataset.esc }); toast("It hands off on its next step"); });
 }
+
+// ------------------------------------------------------------ engines and 3D apps
+const appMsg = {};
+function hintHtml(t) { return esc(t).replace(/(ModelContextProtocol\.StartServer|unity pipeline install|\/mcp|\$env:[^\n]+?iex)/g, "<code>$1</code>"); }
+function renderApps(L) {
+  const apps = L.apps || [], c = L.claude || {};
+  let anyLink = false, anyOpen = false;
+  for (const a of apps) {
+    $("ap-" + a.id)?.setAttribute("fill", LIGHT_FILL[a.light] || LIGHT_FILL.off);
+    if (a.claude === "connected" && a.running) anyLink = true;
+    if (a.running) anyOpen = true;
+  }
+  $("cc-apps").setAttribute("class", "channel-core" + (anyLink ? " live" : " off"));
+  $("cc-tray").setAttribute("class", "channel-core" + (anyOpen ? " live" : " off"));
+  const note = !c.installed && c.checked != null ? "Claude Code isn't installed on this PC, so the apps can't connect yet."
+    : c.signed_in === false ? "Claude Code isn't signed in. Run claude in a terminal once to sign in."
+    : c.checked ? `Claude Code last checked its connections at ${c.checked}.` : "Asking Claude Code about its connections…";
+  $("claudeNote").textContent = note;
+  const sig = JSON.stringify([apps, appMsg, c.installed]);
+  if (sig === S.appSig) return; S.appSig = sig;
+  $("appList").innerHTML = apps.map(a => {
+    const canConnect = c.installed && (a.claude == null || a.claude === "failed");
+    const m = appMsg[a.id];
+    return `<div class="app"><span class="light ${esc(a.light)}"></span>
+      <div><b>${esc(a.name)}</b> <span class="sum">${esc(a.summary)}</span></div>
+      <div class="actions">
+        ${canConnect ? `<button class="btn ${a.claude == null ? "main" : ""}" data-connect="${a.id}">${a.claude == null ? "Connect" : "Connect again"}</button>` : ""}
+        ${a.id === "unreal" ? `<button class="btn" data-uesetup>Set up a project</button>` : ""}
+      </div>
+      ${a.hint && a.light !== "good" ? `<div class="hint">${hintHtml(a.hint)}</div>` : ""}
+      ${m ? `<div class="result ${m.ok ? "ok" : "err"}">${hintHtml(m.text)}</div>` : ""}</div>`;
+  }).join("");
+  $("appList").querySelectorAll("[data-connect]").forEach(b => b.onclick = async () => {
+    const id = b.dataset.connect; b.disabled = true; b.textContent = "Connecting…";
+    try { const r = await api("/router/apps/connect", { app: id }); appMsg[id] = { ok: r.ok, text: r.message }; }
+    catch (e) { appMsg[id] = { ok: false, text: e.message }; }
+    S.appSig = null; if (S.live) renderApps(S.live);
+  });
+  const ue = $("appList").querySelector("[data-uesetup]");
+  if (ue) ue.onclick = async () => {
+    let dir = $("planProject").value.trim();
+    if (!dir) { try { dir = (await api("/router/pick-folder", {})).path; } catch {} }
+    if (!dir) { dir = prompt("Your Unreal project folder (the one with the .uproject file):") || ""; }
+    if (!dir) return;
+    try {
+      const r = await api("/router/apps/unreal-setup", { project: dir });
+      appMsg.unreal = r.ok ? { ok: true, text: r.done.join(". ") + ". Restart Unreal to load it." } : { ok: false, text: r.message };
+    } catch (e) { appMsg.unreal = { ok: false, text: e.message }; }
+    S.appSig = null; if (S.live) renderApps(S.live);
+  };
+}
+$("appsCheck").onclick = async () => {
+  const b = $("appsCheck"); b.disabled = true; b.textContent = "Checking…";
+  try { await api("/router/claude/refresh", {}); toast("Checked"); } catch (e) { toast(e.message); }
+  finally { b.disabled = false; b.textContent = "Check again"; }
+};
+
+// ------------------------------------------------------------ plan with Claude
+let lastPlanSig = "";
+function renderPlan(p) {
+  if (!p) return;
+  const sig = JSON.stringify(p); if (sig === lastPlanSig) return; lastPlanSig = sig;
+  const show = p.state !== "idle" && !S.planDismissed;
+  $("planForm").classList.toggle("gone", show);
+  $("planRun").classList.toggle("gone", !show);
+  if (!show) return;
+  const names = { running: "Claude is working on the blueprint", done: "The blueprint is ready", failed: "Claude couldn't finish the blueprint", cancelled: "Stopped" };
+  setLight($("planLight"), { running: "wait", done: "good", failed: "bad", cancelled: "off" }[p.state] || "off");
+  $("planState").textContent = names[p.state] + (p.seconds ? ` (${fmtDur(p.seconds)})` : "");
+  $("planCancel").classList.toggle("gone", p.state !== "running");
+  $("planSteps").innerHTML = (p.steps || []).slice(-12).map(t => `<li>${esc(t)}</li>`).join("");
+  $("planSteps").scrollTop = 1e6;
+  $("planDone").classList.toggle("gone", p.state === "running");
+  $("planOpen").classList.toggle("gone", p.state !== "done");
+  $("planCopy").classList.toggle("gone", p.state !== "done");
+  const note = $("planNote");
+  if (p.state === "failed") { note.className = "result err"; note.textContent = p.error || "Something went wrong."; }
+  else if (p.state === "done") { note.className = "result"; note.textContent = "Next: open OpenCode in the project folder (it's already pointed at the router), paste the build instructions, and the Mac builds it step by step."; }
+  else { note.className = "result"; note.textContent = ""; }
+  S.buildPrompt = p.build_prompt;
+}
+$("planJump").onclick = () => { $("planBox").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" }); setTimeout(() => $("planIdea").focus(), 300); };
+$("planBrowse").onclick = async () => { try { const r = await api("/router/pick-folder", {}); if (r.path) $("planProject").value = r.path; } catch (e) { toast(e.message); } };
+$("planStart").onclick = async () => {
+  const project = $("planProject").value.trim(), idea = $("planIdea").value.trim();
+  if (!project) { toast("Choose the project folder first"); $("planProject").focus(); return; }
+  if (idea.length < 8) { toast("Describe the feature in a sentence or two"); $("planIdea").focus(); return; }
+  $("planStart").disabled = true;
+  try { await api("/router/blueprint", { project, idea, model: $("planModel").value }); S.planDismissed = false; lastPlanSig = ""; toast("Claude is planning"); }
+  catch (e) { toast(e.message); }
+  finally { $("planStart").disabled = false; }
+};
+$("planCancel").onclick = () => api("/router/blueprint/cancel", {}).catch(e => toast(e.message));
+$("planOpen").onclick = () => api("/router/open", { what: "blueprint" }).catch(e => toast(e.message));
+$("planCopy").onclick = () => copy(S.buildPrompt || "", "Build instructions copied");
+$("planAgain").onclick = () => { S.planDismissed = true; lastPlanSig = ""; $("planIdea").value = ""; renderPlan(S.live?.planner); $("planForm").classList.remove("gone"); $("planRun").classList.add("gone"); $("planIdea").focus(); };
 
 // ------------------------------------------------------------ model picker
 let chosen = "";
@@ -634,6 +810,10 @@ function frame(now) {
       if (k === "local" && tps > 0) spawn("gpu", -OUT.gpu, "", 2.5 + Math.random() * 1.5);
     }
   }
+  if (rates.planning) {
+    acc.claude = (acc.claude || 0) + 1.6 * dt;
+    while (acc.claude >= 1) { acc.claude -= 1; spawn("claude", Math.random() < .5 ? 1 : -1, "handoff", 3 + Math.random() * 2); }
+  }
   for (let i = bubbles.length - 1; i >= 0; i--) {
     const b = bubbles[i]; b.t += dt * b.speed;
     if (b.t >= 1) { b.el.remove(); bubbles.splice(i, 1); continue; }
@@ -675,6 +855,12 @@ async function refreshStatus() {
   try {
     S.setup = await api("/router/setup");
     if (S.setup.autostart !== null && S.setup.autostart !== undefined) { $("autostartWrap").classList.remove("gone"); $("autostart").checked = S.setup.autostart; }
+  } catch {}
+  try {
+    const b = await api("/router/blueprint");
+    if (b.last_project) $("planProject").value = b.last_project;
+    if (b.model) $("planModel").value = b.model;
+    if (b.job?.idea) $("planIdea").value = b.job.idea;
   } catch {}
   await refreshStatus();
   if (S.status) renderLive(S.status);

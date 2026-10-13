@@ -16,6 +16,8 @@ pub struct Config {
     pub nodes: Nodes,
     pub local_model: LocalModelCfg,
     pub escalation: EscalationCfg,
+    pub claude: ClaudeCfg,
+    pub apps: AppsCfg,
 }
 
 impl Default for Config {
@@ -25,7 +27,37 @@ impl Default for Config {
             nodes: Nodes::default(),
             local_model: LocalModelCfg::default(),
             escalation: EscalationCfg::default(),
+            claude: ClaudeCfg::default(),
+            apps: AppsCfg::default(),
         }
+    }
+}
+
+/// Claude Code, used as the architect (blueprints) and for rescues.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClaudeCfg {
+    /// Path to the claude command. Empty = find it automatically.
+    pub command: String,
+    /// Model for blueprints: "" (your Claude Code default) or e.g. "opus".
+    pub blueprint_model: String,
+    /// The last project folder planned, offered again next time.
+    pub last_project: String,
+}
+
+/// Unreal, Unity and Blender: where their MCP servers listen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppsCfg {
+    /// Unreal's built-in ModelContextProtocol plugin (HTTP).
+    pub unreal_url: String,
+    /// Blender's MCP add-on (TCP).
+    pub blender_port: u16,
+}
+
+impl Default for AppsCfg {
+    fn default() -> Self {
+        Self { unreal_url: "http://127.0.0.1:8000/mcp".into(), blender_port: 9876 }
     }
 }
 
@@ -99,6 +131,9 @@ pub struct LocalModelCfg {
     pub autostart: bool,
     /// Extra folders to look in for models.
     pub model_dirs: Vec<PathBuf>,
+    /// Stop this model while Unreal, Unity or Blender is open, so they get
+    /// the whole GPU; start it again when they close.
+    pub pause_for_apps: bool,
 }
 
 impl Default for LocalModelCfg {
@@ -111,6 +146,7 @@ impl Default for LocalModelCfg {
             gpu_layers: 99,
             autostart: true,
             model_dirs: Vec::new(),
+            pause_for_apps: true,
         }
     }
 }

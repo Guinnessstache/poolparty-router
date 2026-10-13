@@ -5,6 +5,9 @@
 // Release builds on Windows are a windowed app: no console window.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod apps;
+mod blueprint;
+mod claude;
 mod classify;
 mod config;
 mod escalation;
@@ -54,6 +57,11 @@ struct App {
     activity: Mutex<VecDeque<Activity>>,
     handoffs_paused: AtomicBool,
     started: Instant,
+    claude: Mutex<claude::ClaudeStatus>,
+    apps: Mutex<Vec<apps::AppStatus>>,
+    planner: blueprint::Planner,
+    /// The apps we paused this PC's model for (empty = not paused by us).
+    paused_for: Mutex<Vec<&'static str>>,
 }
 
 impl App {
@@ -147,12 +155,18 @@ async fn main() -> anyhow::Result<()> {
         activity: Mutex::new(VecDeque::new()),
         handoffs_paused: AtomicBool::new(paused),
         started: Instant::now(),
+        claude: Mutex::new(claude::ClaudeStatus::default()),
+        apps: Mutex::new(Vec::new()),
+        planner: blueprint::Planner::default(),
+        paused_for: Mutex::new(Vec::new()),
     });
     tracing::info!(target: "router", "PoolParty Router {} starting (settings: {})",
         env!("CARGO_PKG_VERSION"), cfg_path.display());
 
     app.nodes.spawn_poller(http, app.cfg.clone());
     spawn_ticker(app.clone());
+    spawn_claude_watch(app.clone());
+    spawn_apps_watch(app.clone());
     {
         let app = app.clone();
         tokio::task::spawn_blocking(move || rescan(&app));
@@ -181,6 +195,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/router/open", post(open_thing))
         .route("/router/autostart", post(autostart))
         .route("/router/quit", post(quit))
+        .route("/router/claude", get(claude_info))
+        .route("/router/claude/refresh", post(claude_refresh))
+        .route("/router/apps/connect", post(app_connect))
+        .route("/router/apps/unreal-setup", post(unreal_setup))
+        .route("/router/blueprint", get(blueprint_get).post(blueprint_start))
+        .route("/router/blueprint/cancel", post(blueprint_cancel))
+        .route("/router/pick-folder", post(pick_folder))
         .route("/router/escalate", post(escalate))
         .route("/router/reset", post(reset))
         .route("/router/mode", post(set_mode))
@@ -241,6 +262,14 @@ fn spawn_ticker(app: Shared) {
     });
 }
 
+fn claude_summary(app: &App) -> Value {
+    let c = app.claude.lock().unwrap();
+    json!({
+        "installed": c.installed, "signed_in": c.signed_in, "auth_method": c.auth_method,
+        "version": c.version, "checked": c.checked, "servers": c.servers.len(), "error": c.error,
+    })
+}
+
 fn live_state(app: &App) -> Value {
     let t = app.traffic.last();
     let sessions = app.sessions.lock().unwrap();
@@ -254,6 +283,10 @@ fn live_state(app: &App) -> Value {
         "sessions": sessions.len(),
         "sessions_with_strikes": stuck,
         "uptime_secs": app.started.elapsed().as_secs(),
+        "apps": *app.apps.lock().unwrap(),
+        "claude": claude_summary(app),
+        "planner": app.planner.snapshot(),
+        "model_paused_for": *app.paused_for.lock().unwrap(),
     })
 }
 
@@ -566,6 +599,10 @@ async fn open_thing(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(p
         }
         Some("logs") => cfg.router.log_file.clone().unwrap_or_else(|| app.cfg_path.clone()),
         Some("settings") => app.cfg_path.clone(),
+        Some("blueprint") => match app.planner.snapshot().file {
+            Some(f) => PathBuf::from(f),
+            None => return error(StatusCode::NOT_FOUND, "no blueprint yet"),
+        },
         Some("handoff") => {
             // Only files inside the handoff folder.
             let Some(p) = v["path"].as_str().map(PathBuf::from) else {
@@ -986,4 +1023,270 @@ async fn set_mode(State(app): State<Shared>, headers: HeaderMap, body: Bytes) ->
     app.handoffs_paused.store(paused, Ordering::Relaxed);
     tracing::info!(target: "handoff", "handoffs {}", if paused { "paused" } else { "resumed" });
     ok(json!({"paused": paused}))
+}
+
+// ------------------------------------------------------------ Claude Code + creative apps
+
+/// Ask Claude Code for its status and MCP health every 45 seconds (it starts
+/// each MCP server to check it, so not more often).
+fn spawn_claude_watch(app: Shared) {
+    tokio::spawn(async move {
+        loop {
+            refresh_claude(&app).await;
+            tokio::time::sleep(Duration::from_secs(45)).await;
+        }
+    });
+}
+
+/// Recheck the creative apps right away (after a connect or a refresh).
+async fn recheck_apps(app: &App) {
+    let servers = app.claude.lock().unwrap().servers.clone();
+    let ac = app.cfg().apps.clone();
+    if let Ok(st) = tokio::task::spawn_blocking(move || apps::check(&ac, &servers, &apps::running_processes())).await {
+        *app.apps.lock().unwrap() = st;
+    }
+}
+
+async fn refresh_claude(app: &App) {
+    let cmd = app.cfg.read().unwrap().claude.command.clone();
+    let fresh = claude::status(&cmd).await;
+    let before = std::mem::replace(&mut *app.claude.lock().unwrap(), fresh.clone());
+    if before.installed != fresh.installed || before.signed_in != fresh.signed_in {
+        match (fresh.installed, fresh.signed_in) {
+            (false, _) => tracing::warn!(target: "claude", "Claude Code isn't installed on this PC"),
+            (true, Some(false)) => tracing::warn!(target: "claude", "Claude Code is installed but not signed in"),
+            (true, _) => tracing::info!(target: "claude", "Claude Code {} is ready ({})",
+                fresh.version.as_deref().unwrap_or(""), fresh.auth_method.as_deref().unwrap_or("signed in")),
+        }
+    }
+    for s in &fresh.servers {
+        let old = before.servers.iter().find(|o| o.name == s.name).map(|o| o.health.as_str());
+        if old != Some(s.health.as_str()) {
+            tracing::info!(target: "claude", "Claude Code connection \"{}\": {}", s.name, s.detail);
+        }
+    }
+}
+
+/// Every 3 seconds: which creative apps are open, and pause this PC's model
+/// while any of them is (so they get the whole GPU).
+fn spawn_apps_watch(app: Shared) {
+    tokio::spawn(async move {
+        let mut was_running: Vec<&'static str> = Vec::new();
+        loop {
+            let cfg = app.cfg();
+            let servers = app.claude.lock().unwrap().servers.clone();
+            let apps_cfg = cfg.apps.clone();
+            let status = tokio::task::spawn_blocking(move || {
+                let procs = apps::running_processes();
+                apps::check(&apps_cfg, &servers, &procs)
+            })
+            .await
+            .unwrap_or_default();
+            let running: Vec<&'static str> = status.iter().filter(|a| a.running).map(|a| a.name).collect();
+            for a in &status {
+                let was = was_running.contains(&a.name);
+                if a.running && !was {
+                    tracing::info!(target: "apps", "{} opened. {}", a.name, a.summary);
+                } else if !a.running && was {
+                    tracing::info!(target: "apps", "{} closed", a.name);
+                }
+            }
+            was_running = running.clone();
+            *app.apps.lock().unwrap() = status;
+
+            if cfg.local_model.pause_for_apps && cfg.nodes.local.url.is_empty() {
+                let paused = !app.paused_for.lock().unwrap().is_empty();
+                if !running.is_empty() && !paused && app.model.is_active() {
+                    tracing::info!(target: "router", "{} is open, so this PC's model is paused to give it the whole GPU",
+                        running.join(" and "));
+                    app.model.stop().await;
+                    *app.paused_for.lock().unwrap() = running.clone();
+                } else if running.is_empty() && paused {
+                    app.paused_for.lock().unwrap().clear();
+                    tracing::info!(target: "router", "creative apps closed; starting this PC's model again");
+                    if let Err(e) = app.model.start(&cfg.local_model).await {
+                        tracing::warn!(target: "router", "couldn't restart this PC's model: {e}");
+                    }
+                } else if paused {
+                    *app.paused_for.lock().unwrap() = running.clone();
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    });
+}
+
+async fn claude_info(State(app): State<Shared>, headers: HeaderMap) -> Response {
+    if !authorized(&app, &headers, None) {
+        return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
+    }
+    let c = app.claude.lock().unwrap().clone();
+    ok(json!({"claude": c, "apps": *app.apps.lock().unwrap(), "unity_cli": apps::unity_cli_installed(),
+              "desktop_servers": claude::desktop_servers().into_iter().map(|(k, _)| k).collect::<Vec<_>>()}))
+}
+
+async fn claude_refresh(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    refresh_claude(&app).await;
+    recheck_apps(&app).await;
+    claude_info(State(app), headers).await
+}
+
+/// Body: {"app": "unreal"|"unity"|"blender"}. Adds the app's MCP server to
+/// Claude Code (user scope), copying it from the Claude desktop app when
+/// that already has one.
+async fn app_connect(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, body: Bytes) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let Some(which) = v["app"].as_str().and_then(apps::App::from_id) else {
+        return error(StatusCode::BAD_REQUEST, "app must be unreal, unity or blender");
+    };
+    let cfg = app.cfg();
+    let Some(cl) = claude::find(&cfg.claude.command) else {
+        return error(StatusCode::BAD_REQUEST, "Claude Code isn't installed. Install it from claude.com/claude-code, sign in once, then press Connect again.");
+    };
+    let result = connect_app(&app, &cl, which, &cfg).await;
+    refresh_claude(&app).await;
+    recheck_apps(&app).await;
+    match result {
+        Ok(msg) => {
+            tracing::info!(target: "apps", "{}: {msg}", which.name());
+            ok(json!({"ok": true, "message": msg}))
+        }
+        Err(e) => {
+            tracing::warn!(target: "apps", "{}: {e}", which.name());
+            ok(json!({"ok": false, "message": e}))
+        }
+    }
+}
+
+async fn connect_app(app: &App, cl: &std::path::Path, which: apps::App, cfg: &Config) -> Result<String, String> {
+    let id = which.id();
+    // 1. The Claude desktop app may already have it set up: copy that over.
+    let from_desktop = claude::desktop_servers().into_iter().find(|(name, v)| {
+        name.to_lowercase().contains(id) || v.to_string().to_lowercase().contains(id)
+    });
+    if let Some((name, mut v)) = from_desktop {
+        if v.get("url").is_some() && v.get("type").is_none() {
+            v["type"] = json!("http");
+        }
+        claude::add_server(cl, id, &v).await?;
+        return Ok(format!("Copied the \"{name}\" connection from the Claude desktop app into Claude Code."));
+    }
+    // 2. Otherwise set it up from what we know about each app.
+    match which {
+        apps::App::Unreal => {
+            let base = cfg.apps.unreal_url.trim_end_matches('/').trim_end_matches("/mcp").to_string();
+            let mut url = cfg.apps.unreal_url.clone();
+            for cand in [cfg.apps.unreal_url.clone(), format!("{base}/mcp"), format!("{base}/"), base.clone()] {
+                if claude::probe_http_mcp(&app.http, &cand).await {
+                    url = cand;
+                    break;
+                }
+            }
+            claude::add_server(cl, "unreal", &json!({"type": "http", "url": url})).await?;
+            Ok(format!("Added Unreal ({url}) to Claude Code. It shows as connected while the editor is open with its MCP server running."))
+        }
+        apps::App::Unity => {
+            if !apps::unity_cli_installed() {
+                return Err("Unity connects through the Unity command-line tool, which isn't installed. In PowerShell run:  $env:UNITY_CLI_CHANNEL='beta'; irm https://public-cdn.cloud.unity3d.com/hub/prod/cli/install.ps1 | iex   then press Connect again.".into());
+            }
+            claude::add_server(cl, "unity", &json!({"type": "stdio", "command": "unity", "args": ["mcp"]})).await?;
+            Ok("Added Unity to Claude Code (through the Unity command-line tool). Open a project with the Pipeline package to connect.".into())
+        }
+        apps::App::Blender => Err("Blender connects through its MCP add-on plus a small bridge program that isn't set up yet. Add Blender in the Claude desktop app (Settings > Connectors) or follow blender.org/lab/mcp-server, then press Connect again and it will be copied into Claude Code.".into()),
+    }
+}
+
+/// Body: {"project": "<folder with a .uproject>"}
+async fn unreal_setup(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, body: Bytes) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let Some(dir) = v["project"].as_str().map(PathBuf::from) else {
+        return error(StatusCode::BAD_REQUEST, "project folder missing");
+    };
+    match blueprint::setup_unreal_project(&dir) {
+        Ok(done) => {
+            for d in &done {
+                tracing::info!(target: "apps", "Unreal project {}: {d}", dir.display());
+            }
+            ok(json!({"ok": true, "done": done}))
+        }
+        Err(e) => ok(json!({"ok": false, "message": e})),
+    }
+}
+
+async fn blueprint_get(State(app): State<Shared>, headers: HeaderMap) -> Response {
+    if !authorized(&app, &headers, None) {
+        return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
+    }
+    let job = app.planner.snapshot();
+    let text = job.file.as_ref().and_then(|f| std::fs::read_to_string(f).ok());
+    let cfg = app.cfg();
+    ok(json!({"job": job, "blueprint": text, "last_project": cfg.claude.last_project, "model": cfg.claude.blueprint_model}))
+}
+
+/// Body: {"project": "...", "idea": "...", "model": "" | "opus"}
+async fn blueprint_start(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, body: Bytes) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let project = v["project"].as_str().unwrap_or("").trim().to_string();
+    let idea = v["idea"].as_str().unwrap_or("").to_string();
+    let model = v["model"].as_str().unwrap_or("").to_string();
+    let cfg = app.cfg();
+    let Some(cl) = claude::find(&cfg.claude.command) else {
+        return error(StatusCode::BAD_REQUEST, "Claude Code isn't installed on this PC.");
+    };
+    let router_url = format!("http://{}/v1", cfg.router.listen.first().cloned().unwrap_or_default());
+    if let Err(e) = app.planner.start(cl, PathBuf::from(&project), idea, model.clone(), router_url) {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
+    {
+        let mut c = app.cfg.write().unwrap();
+        c.claude.last_project = project;
+        c.claude.blueprint_model = model;
+    }
+    let _ = app.cfg().save(&app.cfg_path);
+    ok(json!({"started": true}))
+}
+
+async fn blueprint_cancel(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    app.planner.cancel();
+    ok(json!({"cancelled": true}))
+}
+
+/// Windows folder picker, shown on top of the app window.
+async fn pick_folder(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    if !cfg!(windows) {
+        return error(StatusCode::BAD_REQUEST, "type the folder path instead");
+    }
+    let script = "Add-Type -AssemblyName System.Windows.Forms; \
+        $f = New-Object System.Windows.Forms.Form -Property @{TopMost=$true; ShowInTaskbar=$false}; \
+        $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+        $d.Description = 'Choose your project folder'; $d.ShowNewFolderButton = $true; \
+        if ($d.ShowDialog($f) -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }";
+    let out = tokio::task::spawn_blocking(move || {
+        let mut c = std::process::Command::new("powershell");
+        c.args(["-NoProfile", "-STA", "-Command", script]);
+        sys::quiet(&mut c).output()
+    })
+    .await;
+    match out {
+        Ok(Ok(o)) => ok(json!({"path": String::from_utf8_lossy(&o.stdout).trim()})),
+        _ => error(StatusCode::INTERNAL_SERVER_ERROR, "couldn't open the folder picker"),
+    }
 }
