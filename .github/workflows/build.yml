@@ -41,9 +41,20 @@ jobs:
         with:
           name: PoolParty-Router-windows-x64
           path: PoolParty-Router-windows-x64.zip
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: PoolParty-Router-windows-x64.zip
-          generate_release_notes: true
+      - name: Release when the version is new
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $tag = "v$ver"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "$tag already released; nothing to do."
+            exit 0
+          }
+          gh release create $tag PoolParty-Router-windows-x64.zip `
+            --target "$env:GITHUB_SHA" --title "PoolParty Router $ver" --generate-notes `
+            --notes "Download **PoolParty-Router-windows-x64.zip** below, unzip it anywhere and open **PoolParty Router**. Windows will say the app is unsigned: choose More info, then Run anyway."
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
