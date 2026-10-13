@@ -1175,6 +1175,7 @@ fn entry_url(v: &Value) -> Option<String> {
 
 /// Ways to run a desktop entry from Claude Code, best first.
 fn variants(v: &Value) -> Vec<Value> {
+    let from_extension = v["_extension"] == json!(true);
     let mut v = v.clone();
     if let Some(o) = v.as_object_mut() {
         o.remove("_extension");
@@ -1188,13 +1189,18 @@ fn variants(v: &Value) -> Vec<Value> {
         stdio["type"] = json!("stdio");
         // `uv run pkg` only works inside one project folder; `uvx pkg` works anywhere.
         let args: Vec<Value> = v["args"].as_array().cloned().unwrap_or_default();
-        if v["command"] == "uv" && args.first().and_then(|a| a.as_str()) == Some("run") && args.len() > 1 {
+        // (Not for extensions: they carry their own code, and a PyPI package
+        // with the same name can be something else entirely.)
+        if !from_extension && v["command"] == "uv" && args.first().and_then(|a| a.as_str()) == Some("run") && args.len() > 1
+            && !args.iter().any(|a| a == "--directory" || a == "--project") {
             let mut uvx = stdio.clone();
             uvx["command"] = json!("uvx");
             uvx["args"] = json!(args[1..].to_vec());
+            out.push(stdio);
             out.push(uvx);
+        } else {
+            out.push(stdio);
         }
-        out.push(stdio);
     }
     out
 }

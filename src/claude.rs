@@ -354,6 +354,28 @@ fn desktop_extensions(dir: &Path) -> Vec<(String, serde_json::Value)> {
     out
 }
 
+/// `uv run <script> [args]` inside a project that already has a .venv:
+/// run `<venv python> -c "from module import func; func()"` instead.
+fn venv_entry(dir: &Path, script: &str, rest: &[String]) -> Option<serde_json::Value> {
+    let py = if cfg!(windows) { dir.join(".venv").join("Scripts").join("python.exe") } else { dir.join(".venv").join("bin").join("python") };
+    if !py.is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(dir.join("pyproject.toml")).ok()?;
+    let doc: toml::Value = toml::from_str(&text).ok()?;
+    let target = doc.get("project")?.get("scripts")?.get(script)?.as_str()?;
+    let (module, func) = target.split_once(':')?;
+    let (module, func) = (module.trim(), func.trim());
+    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+    if !ok(module) || !ok(func) {
+        return None;
+    }
+    let code = format!("import sys; sys.argv[0] = '{script}'; from {module} import {f}; sys.exit({func}())", f = func.split('.').next().unwrap_or(func));
+    let mut args = vec!["-c".to_string(), code];
+    args.extend(rest.iter().cloned());
+    Some(serde_json::json!({"type": "stdio", "command": py.display().to_string(), "args": args}))
+}
+
 fn extension_entry(m: &serde_json::Value, ext_dir: &Path, user: &serde_json::Value) -> Option<serde_json::Value> {
     let cfg = &m["server"]["mcp_config"];
     let command = cfg["command"].as_str()?;
@@ -388,6 +410,20 @@ fn extension_entry(m: &serde_json::Value, ext_dir: &Path, user: &serde_json::Val
         .flatten()
         .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), serde_json::Value::String(fill(s)))))
         .collect();
+    // Claude desktop starts extensions inside their own folder. Claude Code
+    // doesn't, so `uv run <script>` must be told where the project is.
+    let mut args = args;
+    let is_uv = Path::new(command).file_stem().map(|s| s.to_string_lossy().to_lowercase()) == Some("uv".into());
+    if is_uv && args.first().map(String::as_str) == Some("run") && !args.iter().any(|a| a == "--directory" || a == "--project") {
+        // Best: the Python environment Claude desktop already built, calling the
+        // script's function directly (no rebuild, no uv launcher).
+        if let Some(entry) = args.get(1).and_then(|script| venv_entry(ext_dir, script, &args[2..])) {
+            return Some(entry);
+        }
+        args.insert(1, "--no-sync".into());
+        args.insert(2, "--directory".into());
+        args.insert(3, ext_dir.display().to_string());
+    }
     let mut entry = serde_json::json!({"type": "stdio", "command": fill(command), "args": args});
     if !env.is_empty() {
         entry["env"] = serde_json::Value::Object(env);
@@ -544,6 +580,20 @@ mod tests {
             "mcp_config":{"command":"uvx","args":["${__dirname}/server.py","--port","${user_config.port}"],
             "env":{"BLENDER_HOST":"${user_config.host}"}}},
             "user_config":{"port":{"default":9876},"host":{"default":"localhost"}}}"#).unwrap();
+        let uvm: serde_json::Value = serde_json::from_str(r#"{"server":{"type":"uv","entry_point":"blmcp/__init__.py",
+            "mcp_config":{"command":"uv","args":["run","blender-mcp"]}}}"#).unwrap();
+        let u = extension_entry(&uvm, Path::new("/nonexistent/bl"), &serde_json::Value::Null).unwrap();
+        assert_eq!(u["args"], serde_json::json!(["run", "--no-sync", "--directory", "/nonexistent/bl", "blender-mcp"]));
+        // With a built .venv, the script's function is called directly.
+        let dir = std::env::temp_dir().join(format!("pp-ext-{}", std::process::id()));
+        let bin = if cfg!(windows) { dir.join(".venv/Scripts") } else { dir.join(".venv/bin") };
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join(if cfg!(windows) { "python.exe" } else { "python" }), "").unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "[project]\nname='x'\n[project.scripts]\nblender-mcp = \"blmcp:main\"\n").unwrap();
+        let v = extension_entry(&uvm, &dir, &serde_json::Value::Null).unwrap();
+        assert!(v["command"].as_str().unwrap().contains(".venv"));
+        assert_eq!(v["args"][1], "import sys; sys.argv[0] = 'blender-mcp'; from blmcp import main; sys.exit(main())");
+        let _ = std::fs::remove_dir_all(&dir);
         let e = extension_entry(&m, Path::new("/ext/b"), &serde_json::json!({"host": "127.0.0.1"})).unwrap();
         assert_eq!(e["command"], "uvx");
         assert_eq!(e["args"], serde_json::json!(["/ext/b/server.py", "--port", "9876"]));
