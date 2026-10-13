@@ -1241,18 +1241,31 @@ async fn connect_app(app: &App, cl: &std::path::Path, which: apps::App, cfg: &Co
         let base = cfg.apps.unreal_url.trim_end_matches('/').trim_end_matches("/mcp").to_string();
         let mut url = cfg.apps.unreal_url.clone();
         let mut up = false;
-        for cand in [cfg.apps.unreal_url.clone(), format!("{base}/mcp"), format!("{base}/"), base.clone()] {
+        let mut cands = vec![cfg.apps.unreal_url.clone(), format!("{base}/mcp"), format!("{base}/"), base.clone()];
+        // Whatever ports the editor itself is listening on, in case it picked another one.
+        let ports = tokio::task::spawn_blocking(|| apps::listening_ports(apps::App::Unreal)).await.unwrap_or_default();
+        for p in &ports {
+            cands.push(format!("http://127.0.0.1:{p}/mcp"));
+            cands.push(format!("http://127.0.0.1:{p}/"));
+        }
+        for cand in cands {
             if claude::probe_http_mcp(&app.http, &cand).await {
                 url = cand;
                 up = true;
                 break;
             }
         }
+        if up && url != cfg.apps.unreal_url {
+            app.cfg.write().unwrap().apps.unreal_url = url.clone();
+            let _ = app.cfg().save(&app.cfg_path);
+            tracing::info!(target: "apps", "Unreal's MCP server is at {url}; saved that in settings");
+        }
         claude::add_server(cl, "unreal", &json!({"type": "http", "url": url})).await?;
         return if up {
             Ok(format!("Connected Claude Code to Unreal at {url}."))
         } else {
-            Ok(format!("Added Unreal ({url}) to Claude Code. Its light turns green once Unreal's MCP server is running: in Unreal's console run ModelContextProtocol.StartServer."))
+            Ok(format!("Added Unreal ({url}) to Claude Code, but Unreal's MCP server isn't running (the editor is listening on {}). Press Set up a project to enable its plugins, restart Unreal, then press Connect again.",
+                if ports.is_empty() { "no ports".to_string() } else { ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ") }))
         };
     }
     if which == apps::App::Unity {

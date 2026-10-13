@@ -85,6 +85,39 @@ pub fn running_processes() -> Vec<String> {
         .collect()
 }
 
+/// TCP ports a running app is listening on (Windows; empty elsewhere).
+pub fn listening_ports(app: App) -> Vec<u16> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    let Ok(tl) = sys::quiet(Command::new("tasklist").args(["/FO", "CSV", "/NH"])).output() else { return Vec::new() };
+    let pids: Vec<String> = String::from_utf8_lossy(&tl.stdout)
+        .lines()
+        .filter_map(|l| {
+            let parts: Vec<&str> = l.split("\",\"").map(|p| p.trim_matches('"')).collect();
+            let name = parts.first()?.to_lowercase();
+            let base = name.strip_suffix(".exe").unwrap_or(&name).to_string();
+            app.processes().contains(&base.as_str()).then(|| parts.get(1).map(|p| p.to_string())).flatten()
+        })
+        .collect();
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    let Ok(ns) = sys::quiet(Command::new("netstat").args(["-ano", "-p", "tcp"])).output() else { return Vec::new() };
+    let mut ports: Vec<u16> = String::from_utf8_lossy(&ns.stdout)
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (f.len() >= 5 && f[3] == "LISTENING" && pids.iter().any(|p| p == f[4]))
+                .then(|| f[1].rsplit(':').next()?.parse().ok())
+                .flatten()
+        })
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
 fn port_open(port: u16) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
