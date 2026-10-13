@@ -1097,8 +1097,8 @@ fn spawn_apps_watch(app: Shared) {
             if cfg.local_model.pause_for_apps && cfg.nodes.local.url.is_empty() {
                 let paused = !app.paused_for.lock().unwrap().is_empty();
                 if !running.is_empty() && !paused && app.model.is_active() {
-                    tracing::info!(target: "router", "{} is open, so this PC's model is paused to give it the whole GPU",
-                        running.join(" and "));
+                    tracing::info!(target: "router", "{} {} open, so this PC's model is paused to give it the whole GPU",
+                        running.join(" and "), if running.len() > 1 { "are" } else { "is" });
                     app.model.stop().await;
                     *app.paused_for.lock().unwrap() = running.clone();
                 } else if running.is_empty() && paused {
@@ -1176,6 +1176,9 @@ async fn connect_app(app: &App, cl: &std::path::Path, which: apps::App, cfg: &Co
         }
         claude::add_server(cl, id, &v).await?;
         let shown = name.split(" (").next().unwrap_or(&name).to_string();
+        if let Some(why) = claude::probe_stdio(&v).await {
+            return Err(format!("Copied the \"{shown}\" connection into Claude Code, but its program won't start outside the Claude desktop app: {why}"));
+        }
         return Ok(format!("Copied the \"{shown}\" connection from the Claude desktop app into Claude Code."));
     }
     // 2. Otherwise set it up from what we know about each app.

@@ -393,6 +393,104 @@ fn extension_entry(m: &serde_json::Value, ext_dir: &Path, user: &serde_json::Val
     Some(entry)
 }
 
+/// Find a program on PATH the way a shell would (Windows: try PATHEXT, so
+/// "npx" finds npx.cmd).
+fn which(cmd: &str) -> Option<PathBuf> {
+    let p = Path::new(cmd);
+    if p.is_absolute() {
+        return p.is_file().then(|| p.to_path_buf());
+    }
+    let exts: Vec<String> = if cfg!(windows) {
+        let pe = std::env::var("PATHEXT").unwrap_or(".EXE;.CMD;.BAT".into());
+        std::iter::once(String::new()).chain(pe.split(';').map(|e| e.to_lowercase())).collect()
+    } else {
+        vec![String::new()]
+    };
+    for dir in std::env::split_paths(&std::env::var_os("PATH")?) {
+        for e in &exts {
+            let c = dir.join(format!("{cmd}{e}"));
+            if c.is_file() {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
+/// Start a stdio MCP entry the way Claude Code would and ask it to
+/// initialize. None = it answered; Some(reason) = it didn't.
+pub async fn probe_stdio(entry: &serde_json::Value) -> Option<String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    let command = entry["command"].as_str()?;
+    let Some(prog) = which(command) else {
+        return Some(format!("the program \"{command}\" isn't installed on this PC (or isn't on PATH)."));
+    };
+    let args: Vec<String> = entry["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
+    let ext = prog.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let mut c = if cfg!(windows) && (ext == "cmd" || ext == "bat") {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(&prog).args(&args);
+        c
+    } else {
+        let mut c = std::process::Command::new(&prog);
+        c.args(&args);
+        c
+    };
+    if let Some(env) = entry["env"].as_object() {
+        for (k, v) in env {
+            if let Some(v) = v.as_str() {
+                c.env(k, v);
+            }
+        }
+    }
+    c.current_dir(sys::home()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    sys::quiet(&mut c);
+    let mut c = tokio::process::Command::from(c);
+    c.kill_on_drop(true);
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) => return Some(format!("couldn't start {}: {e}", prog.display())),
+    };
+    let init = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "poolparty-router", "version": env!("CARGO_PKG_VERSION")}}});
+    // Kept open (not dropped) while we wait, so the server doesn't see EOF.
+    let mut stdin = child.stdin.take();
+    if let Some(si) = stdin.as_mut() {
+        let _ = si.write_all(format!("{init}\n").as_bytes()).await;
+        let _ = si.flush().await;
+    }
+    let mut out = tokio::io::BufReader::new(child.stdout.take()?).lines();
+    let answered = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Ok(Some(l)) = out.next_line().await {
+            if l.contains("\"jsonrpc\"") {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    if matches!(answered, Ok(true)) {
+        let _ = child.kill().await;
+        return None;
+    }
+    let timed_out = answered.is_err();
+    drop(stdin);
+    let _ = child.kill().await;
+    let mut err = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        let _ = tokio::time::timeout(Duration::from_secs(2), e.read_to_string(&mut err)).await;
+    }
+    let err = clean_output(&err);
+    let lines: Vec<&str> = err.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(4)..].join(" ");
+    Some(match (timed_out, tail.is_empty()) {
+        (_, false) => format!("{} said: {tail}", prog.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()),
+        (true, true) => "it started but didn't answer within 20 seconds.".into(),
+        (false, true) => "it closed right away without saying why.".into(),
+    })
+}
+
 /// Ask an HTTP MCP endpoint to initialize; true if it answers like one.
 pub async fn probe_http_mcp(http: &reqwest::Client, url: &str) -> bool {
     let body = serde_json::json!({
@@ -455,6 +553,16 @@ mod tests {
         assert_eq!(msvc_escape_quotes(r#"{"a":"b"}"#), r#"{\"a\":\"b\"}"#);
         assert_eq!(msvc_escape_quotes(r#"{"p":"C:\\x\\"}"#), r#"{\"p\":\"C:\\x\\\\\"}"#);
         assert_eq!(msvc_escape_quotes(r"a\b"), r"a\b");
+    }
+
+    #[tokio::test]
+    async fn probes_stdio_servers() {
+        let missing = probe_stdio(&serde_json::json!({"command": "no-such-program-xyz"})).await.unwrap();
+        assert!(missing.contains("isn't installed"));
+        let dies = probe_stdio(&serde_json::json!({"command": "sh", "args": ["-c", "echo boom >&2; exit 1"]})).await.unwrap();
+        assert!(dies.contains("boom"), "{dies}");
+        let ok = probe_stdio(&serde_json::json!({"command": "sh", "args": ["-c", "read l; echo '{\"jsonrpc\":\"2.0\",\"id\":1}'; sleep 5"]})).await;
+        assert!(ok.is_none());
     }
 
     #[test]

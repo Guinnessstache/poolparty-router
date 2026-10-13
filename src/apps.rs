@@ -146,7 +146,8 @@ pub fn check(cfg: &AppsCfg, servers: &[McpServer], processes: &[String]) -> Vec<
             } else {
                 match app {
                     App::Unreal => url_port(&cfg.unreal_url).map(port_open),
-                    App::Blender => Some(port_open(cfg.blender_port)),
+                    // Only the community add-on uses a fixed port; others can't be seen from here.
+                    App::Blender => port_open(cfg.blender_port).then_some(true),
                     App::Unity => unity_bridge(),
                 }
             };
