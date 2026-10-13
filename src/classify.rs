@@ -84,24 +84,35 @@ fn has_image(body: &Value) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Target {
-    Mac,
-    Jayspc,
+    /// This PC's GPU.
+    Local,
+    /// The big-memory machine (e.g. a Mac Studio).
+    Remote,
 }
 
 impl Target {
     pub fn name(self) -> &'static str {
         match self {
-            Target::Mac => "mac",
-            Target::Jayspc => "jayspc",
+            Target::Local => "local",
+            Target::Remote => "remote",
+        }
+    }
+
+    /// Model names that pin a request to one machine.
+    pub fn from_model_name(m: &str) -> Option<Target> {
+        match m {
+            "local" | "pc" | "jayspc" => Some(Target::Local),
+            "remote" | "mac" => Some(Target::Remote),
+            _ => None,
         }
     }
 }
 
-/// What the registry knows about a node right now.
+/// What the registry knows about a machine right now.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NodeView {
     pub online: bool,
-    /// Context window of the loaded model, if the node reported one.
+    /// Context window of the loaded model, if the machine reported one.
     pub n_ctx: Option<usize>,
 }
 
@@ -112,44 +123,62 @@ pub enum Decision {
     NoLocal { reason: String },
 }
 
-/// The rule table from the spec, evaluated top to bottom.
-/// `pinned` is set when the client asked for a node by name instead of "auto".
-pub fn decide(shape: &Shape, pinned: Option<Target>, mac: NodeView, jay: NodeView) -> Decision {
+/// The routing rules, evaluated top to bottom.
+/// `pinned` is set when the client asked for a machine by name instead of "auto".
+/// `remote_set_up` is false until someone adds the big machine; until then
+/// this PC takes everything, agent turns included.
+pub fn decide(
+    shape: &Shape,
+    pinned: Option<Target>,
+    remote: NodeView,
+    local: NodeView,
+    remote_set_up: bool,
+) -> Decision {
     let fits = |n: NodeView| n.n_ctx.map_or(true, |c| shape.est_tokens < c);
 
     if let Some(t) = pinned {
         return Decision::Route { target: t, rule: "pinned by model name" };
     }
 
-    match shape.kind {
-        Kind::Completion => {
-            if jay.online && fits(jay) {
-                return Decision::Route { target: Target::Jayspc, rule: "completion -> 4070 Ti" };
-            }
-            if mac.online && fits(mac) {
-                return Decision::Route { target: Target::Mac, rule: "completion fallback -> Mac" };
-            }
+    if !remote_set_up {
+        if local.online && fits(local) {
+            return Decision::Route { target: Target::Local, rule: "this PC (no remote machine set up)" };
         }
-        Kind::Agent | Kind::Chat => {
-            if mac.online && fits(mac) {
-                let rule = match (shape.kind, shape.vision) {
-                    (_, true) => "vision -> Mac",
-                    (Kind::Agent, _) => "agent turn -> Mac",
-                    _ => "chat -> Mac",
-                };
-                return Decision::Route { target: Target::Mac, rule };
+    } else {
+        match shape.kind {
+            Kind::Completion => {
+                if local.online && fits(local) {
+                    return Decision::Route { target: Target::Local, rule: "completion -> this PC" };
+                }
+                if remote.online && fits(remote) {
+                    return Decision::Route { target: Target::Remote, rule: "completion fallback -> remote" };
+                }
             }
-            // Agent turns never spill to the small model: quality drops too far.
-            if shape.kind == Kind::Chat && !shape.vision && jay.online && fits(jay) {
-                return Decision::Route { target: Target::Jayspc, rule: "chat fallback -> 4070 Ti" };
+            Kind::Agent | Kind::Chat => {
+                if remote.online && fits(remote) {
+                    let rule = match (shape.kind, shape.vision) {
+                        (_, true) => "image -> remote",
+                        (Kind::Agent, _) => "agent turn -> remote",
+                        _ => "chat -> remote",
+                    };
+                    return Decision::Route { target: Target::Remote, rule };
+                }
+                // Agent turns never spill to the small model: quality drops too far.
+                if shape.kind == Kind::Chat && !shape.vision && local.online && fits(local) {
+                    return Decision::Route { target: Target::Local, rule: "chat fallback -> this PC" };
+                }
             }
         }
     }
 
-    let reason = if !mac.online && !jay.online {
-        "no local node is online".to_string()
-    } else if shape.kind == Kind::Agent && !mac.online {
-        "the Mac is offline and agent turns are not sent to the 4070 Ti".to_string()
+    let reason = if !remote.online && !local.online {
+        if remote_set_up {
+            "no model machine is online".to_string()
+        } else {
+            "this PC's model isn't running (press Start in the app)".to_string()
+        }
+    } else if remote_set_up && shape.kind == Kind::Agent && !remote.online {
+        "the remote machine is offline and agent turns are not sent to the smaller local model".to_string()
     } else {
         format!("prompt (~{} tokens) is larger than any loaded model's context", shape.est_tokens)
     };
@@ -179,13 +208,23 @@ mod tests {
     #[test]
     fn routes() {
         let s = |kind| Shape { kind, vision: false, est_tokens: 1000 };
-        assert_eq!(decide(&s(Kind::Completion), None, UP, SMALL), Decision::Route { target: Target::Jayspc, rule: "completion -> 4070 Ti" });
-        assert!(matches!(decide(&s(Kind::Agent), None, UP, SMALL), Decision::Route { target: Target::Mac, .. }));
-        assert!(matches!(decide(&s(Kind::Chat), None, DOWN, SMALL), Decision::Route { target: Target::Jayspc, .. }));
-        assert!(matches!(decide(&s(Kind::Agent), None, DOWN, SMALL), Decision::NoLocal { .. }));
-        assert!(matches!(decide(&s(Kind::Completion), None, UP, DOWN), Decision::Route { target: Target::Mac, .. }));
+        assert_eq!(decide(&s(Kind::Completion), None, UP, SMALL, true), Decision::Route { target: Target::Local, rule: "completion -> this PC" });
+        assert!(matches!(decide(&s(Kind::Agent), None, UP, SMALL, true), Decision::Route { target: Target::Remote, .. }));
+        assert!(matches!(decide(&s(Kind::Chat), None, DOWN, SMALL, true), Decision::Route { target: Target::Local, .. }));
+        assert!(matches!(decide(&s(Kind::Agent), None, DOWN, SMALL, true), Decision::NoLocal { .. }));
+        assert!(matches!(decide(&s(Kind::Completion), None, UP, DOWN, true), Decision::Route { target: Target::Remote, .. }));
         let big = Shape { kind: Kind::Chat, vision: false, est_tokens: 100_000 };
-        assert!(matches!(decide(&big, None, UP, SMALL), Decision::NoLocal { .. }));
-        assert!(matches!(decide(&s(Kind::Agent), Some(Target::Jayspc), UP, SMALL), Decision::Route { target: Target::Jayspc, .. }));
+        assert!(matches!(decide(&big, None, UP, SMALL, true), Decision::NoLocal { .. }));
+        assert!(matches!(decide(&s(Kind::Agent), Some(Target::Local), UP, SMALL, true), Decision::Route { target: Target::Local, .. }));
+    }
+
+    #[test]
+    fn without_a_remote_this_pc_takes_everything() {
+        let agent = Shape { kind: Kind::Agent, vision: false, est_tokens: 1000 };
+        assert!(matches!(decide(&agent, None, DOWN, SMALL, false), Decision::Route { target: Target::Local, .. }));
+        match decide(&agent, None, DOWN, DOWN, false) {
+            Decision::NoLocal { reason } => assert!(reason.contains("press Start")),
+            d => panic!("{d:?}"),
+        }
     }
 }

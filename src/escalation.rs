@@ -177,7 +177,7 @@ impl Session {
     /// "same error 3 times: X" replaces "same error 2 times: X".
     fn strike_keyed(&mut self, n: u32, why: String, key: Option<&str>) {
         self.strikes += n;
-        tracing::info!(session = %self.id, strikes = self.strikes, %why, "strike");
+        tracing::debug!(session = %self.id, strikes = self.strikes, %why, "strike");
         if let Some(k) = key {
             if let Some(&i) = self.reason_keys.get(k) {
                 self.reasons[i] = why;

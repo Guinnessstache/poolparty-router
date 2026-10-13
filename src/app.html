@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PoolParty Router</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%2322A9CC'/%3E%3Cpath d='M4 18c4-3 8 3 12 0s8 3 12 0' stroke='white' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+:root {
+  --tile: #F2F8FA; --tile-line: #DCEBF1; --panel: #FFFFFF; --ink: #0B2A36; --quiet: #557482;
+  --deep: #0A4F6B; --pool: #22A9CC; --pool-soft: #CDEEF7; --rope-a: #E4572E; --rope-b: #FFFFFF;
+  --good: #1F9D6B; --wait: #F0B429; --bad: #E4572E; --off: #A7BCC5; --line: #D3E4EA;
+  --font: "Bricolage Grotesque", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  --r-lg: 18px; --r-sm: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --tile: #071E28; --tile-line: #0D2E3B; --panel: #0C2733; --ink: #E4F4F9; --quiet: #8FB2BF;
+    --deep: #7FD8EE; --pool: #31C0E3; --pool-soft: #0F3A4A; --rope-b: #0C2733; --line: #17404F; --off: #4E6E7A;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--tile); color: var(--ink); font: 15px/1.5 var(--font); -webkit-font-smoothing: antialiased; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 3px solid var(--pool); outline-offset: 2px; border-radius: 6px; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 18px 20px 40px; }
+
+/* ---------- top bar ---------- */
+.top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 750; font-size: 21px; letter-spacing: -0.01em; color: var(--deep); }
+.brand svg { width: 34px; height: 34px; }
+.headline { flex: 1 1 320px; display: flex; align-items: center; gap: 10px; font-size: 16px; min-width: 0; }
+.headline .light { flex: none; }
+.top-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.light { width: 14px; height: 14px; border-radius: 50%; background: var(--off); box-shadow: 0 0 0 4px color-mix(in srgb, var(--off) 22%, transparent); flex: none; }
+.light.good { background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 22%, transparent); }
+.light.wait { background: var(--wait); box-shadow: 0 0 0 4px color-mix(in srgb, var(--wait) 25%, transparent); animation: breathe 1.4s ease-in-out infinite; }
+.light.bad { background: var(--bad); box-shadow: 0 0 0 4px color-mix(in srgb, var(--bad) 22%, transparent); }
+@keyframes breathe { 50% { opacity: .45; } }
+
+.btn { border: 1.5px solid var(--line); background: var(--panel); border-radius: 999px; padding: 7px 16px; cursor: pointer; font-weight: 600; font-size: 14px; white-space: nowrap; }
+.btn:hover { border-color: var(--pool); }
+.btn.go { background: var(--good); border-color: var(--good); color: #fff; }
+.btn.stop { background: var(--panel); border-color: var(--bad); color: var(--bad); }
+.btn.main { background: var(--deep); border-color: var(--deep); color: var(--tile); }
+.btn.big { padding: 11px 26px; font-size: 16px; }
+.btn:disabled { opacity: .5; cursor: default; }
+.link { background: none; border: 0; color: var(--deep); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; padding: 0; font-weight: 600; }
+
+.switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; color: var(--quiet); user-select: none; }
+.switch input { appearance: none; width: 40px; height: 22px; border-radius: 22px; background: var(--off); position: relative; cursor: pointer; transition: background .15s; margin: 0; flex: none; }
+.switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.switch input:checked { background: var(--good); }
+.switch input:checked::after { transform: translateX(18px); }
+
+/* ---------- live map ---------- */
+.map { margin-top: 16px; border-radius: var(--r-lg); overflow: hidden; position: relative; border: 1.5px solid var(--line);
+  background-color: var(--pool-soft);
+  background-image: linear-gradient(var(--tile-line) 1.5px, transparent 1.5px), linear-gradient(90deg, var(--tile-line) 1.5px, transparent 1.5px);
+  background-size: 34px 34px; }
+.map svg { display: block; width: 100%; height: auto; }
+.map .caption { position: absolute; left: 18px; top: 14px; font-weight: 700; color: var(--deep); font-size: 15px; }
+.map .legend { position: absolute; right: 18px; top: 14px; font-size: 13px; color: var(--quiet); display: flex; gap: 14px; }
+.map .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.node-label { font: 700 17px var(--font); fill: var(--ink); }
+.node-sub { font: 500 13px var(--font); fill: var(--quiet); }
+.flow-num { font: 700 15px var(--font); fill: var(--deep); }
+.flow-sub { font: 500 12px var(--font); fill: var(--quiet); }
+.channel { fill: none; stroke: var(--panel); stroke-width: 16; stroke-linecap: round; opacity: .9; }
+.channel-core { fill: none; stroke: var(--pool); stroke-width: 3; stroke-linecap: round; opacity: .35; }
+.channel-core.live { opacity: .9; }
+.channel-core.off { stroke: var(--off); stroke-dasharray: 2 9; opacity: .8; }
+.bubble { fill: var(--pool); }
+.bubble.req { fill: var(--deep); }
+.bubble.handoff { fill: var(--rope-a); }
+
+/* ---------- lanes ---------- */
+.lanes { margin-top: 18px; background: var(--panel); border-radius: var(--r-lg); border: 1.5px solid var(--line); overflow: hidden; }
+.lane { display: grid; grid-template-columns: 22px minmax(170px, 1.1fr) minmax(220px, 2fr) auto; gap: 14px 18px; align-items: center; padding: 18px 22px; }
+.rope { height: 6px; background: repeating-linear-gradient(90deg, var(--rope-a) 0 14px, var(--rope-b) 14px 28px); opacity: .85; }
+.lane h3 { margin: 0; font-size: 18px; letter-spacing: -0.01em; }
+.lane .what { color: var(--quiet); font-size: 13.5px; }
+.lane .state { font-size: 15px; }
+.lane .state b { font-weight: 650; }
+.lane .stats { color: var(--quiet); font-size: 13.5px; margin-top: 2px; }
+.lane .actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; align-items: center; }
+.lane .more { grid-column: 2 / -1; }
+.panel-inner { background: var(--tile); border-radius: var(--r-sm); padding: 14px 16px; }
+.field { display: grid; gap: 4px; margin-bottom: 10px; }
+.field label { font-size: 13.5px; font-weight: 600; }
+.field .hint { font-size: 12.5px; color: var(--quiet); }
+input[type=text], input[type=password], select { border: 1.5px solid var(--line); background: var(--panel); border-radius: var(--r-sm); padding: 8px 11px; width: 100%; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.result { margin-top: 8px; font-size: 14px; }
+.result.ok { color: var(--good); } .result.err { color: var(--bad); }
+.models { max-height: 260px; overflow: auto; border: 1.5px solid var(--line); border-radius: var(--r-sm); background: var(--panel); }
+.model { display: flex; gap: 12px; align-items: center; padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.model:last-child { border-bottom: 0; }
+.model:hover { background: var(--tile); }
+.model input { accent-color: var(--deep); }
+.model .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.model .size { color: var(--quiet); font-size: 13px; white-space: nowrap; }
+.fit { font-size: 12px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.fit.yes { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
+.fit.no { background: color-mix(in srgb, var(--wait) 22%, transparent); color: #946b00; }
+.sessions { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.sessions li { display: flex; gap: 10px; align-items: center; font-size: 14px; }
+.sessions .task { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dots { display: inline-flex; gap: 3px; }
+.dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
+.dots i.hit { background: var(--wait); }
+
+/* ---------- connect + log ---------- */
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 18px; margin-top: 18px; align-items: start; }
+.box { background: var(--panel); border: 1.5px solid var(--line); border-radius: var(--r-lg); padding: 18px 20px; }
+.box h2 { margin: 0 0 4px; font-size: 18px; letter-spacing: -0.01em; }
+.box p { margin: 0 0 12px; color: var(--quiet); font-size: 14px; }
+.endpoint { display: flex; gap: 8px; }
+.endpoint input { font-family: var(--mono); font-size: 13.5px; }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 14px 0 8px; }
+.tabs button { border: 1.5px solid var(--line); background: none; border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 13.5px; }
+.tabs button[aria-selected=true] { background: var(--deep); color: var(--tile); border-color: var(--deep); }
+pre { margin: 0; background: var(--tile); border-radius: var(--r-sm); padding: 12px; overflow: auto; font: 12.5px/1.55 var(--mono); max-height: 260px; }
+
+.log-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.log-head h2 { margin: 0; flex: 1; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chips button { border: 1.5px solid var(--line); background: none; border-radius: 999px; padding: 3px 11px; cursor: pointer; font-size: 13px; }
+.chips button[aria-pressed=true] { border-color: var(--deep); color: var(--deep); background: var(--pool-soft); }
+.log { height: 340px; overflow: auto; background: var(--tile); border-radius: var(--r-sm); padding: 8px 10px; font: 12.5px/1.6 var(--mono); }
+.log div { display: grid; grid-template-columns: 62px 64px 1fr; gap: 8px; }
+.log .t { color: var(--quiet); }
+.log .s { font-weight: 600; }
+.log .src-router { color: var(--deep); } .log .src-model { color: var(--quiet); } .log .src-request { color: var(--pool); } .log .src-handoff { color: var(--rope-a); }
+.log .m { white-space: pre-wrap; word-break: break-word; }
+.log .warn .m { color: #a8730a; } .log .error .m { color: var(--bad); }
+.log .empty { display: block; color: var(--quiet); padding: 6px 0; font-family: var(--font); }
+
+.toast { position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 20px); background: var(--deep); color: var(--tile); padding: 9px 18px; border-radius: 999px; font-weight: 600; opacity: 0; transition: .2s; pointer-events: none; z-index: 10; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.gone { display: none !important; }
+.foot { margin-top: 18px; color: var(--quiet); font-size: 13px; display: flex; gap: 16px; flex-wrap: wrap; }
+
+@media (max-width: 860px) {
+  .lane { grid-template-columns: 22px 1fr; }
+  .lane .state-col { grid-column: 2; }
+  .lane .actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .lane .more { grid-column: 1 / -1; }
+  .grid2 { grid-template-columns: minmax(0, 1fr); }
+  .map .legend { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .light.wait { animation: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="15" fill="var(--pool)"/><path d="M4 17c4-3 8 3 12 0s8 3 12 0" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round"/><path d="M6 22c3.5-2.5 7 2.5 10 0s7 2.5 10 0" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" opacity=".7"/></svg>
+      PoolParty Router
+    </div>
+    <div class="headline" role="status" aria-live="polite"><span class="light" id="overallLight"></span><span id="overallText">Connecting…</span></div>
+    <div class="top-actions">
+      <label class="switch gone" id="autostartWrap"><input type="checkbox" id="autostart"> Start with Windows</label>
+      <button class="btn" id="quitBtn" title="Stops the router and this PC's model">Quit</button>
+    </div>
+  </header>
+
+  <section class="map" aria-label="Live map of your machines">
+    <span class="caption">Live traffic</span>
+    <span class="legend"><span><i style="background:var(--deep)"></i>request</span><span><i style="background:var(--pool)"></i>answer flowing back</span><span><i style="background:var(--rope-a)"></i>handoff</span></span>
+    <svg viewBox="0 0 1000 400" id="mapSvg" role="img" aria-label="This PC and its GPU, the router, the remote machine and Claude Code, with live traffic between them">
+      <defs>
+        <symbol id="i-pc" viewBox="0 0 64 64"><rect x="16" y="4" width="32" height="56" rx="5" fill="var(--panel)" stroke="var(--ink)" stroke-width="3"/><circle cx="32" cy="16" r="3.5" fill="var(--ink)"/><rect x="23" y="27" width="18" height="3" rx="1.5" fill="var(--ink)"/><rect x="23" y="34" width="18" height="3" rx="1.5" fill="var(--ink)"/><rect x="23" y="41" width="18" height="3" rx="1.5" fill="var(--ink)"/></symbol>
+        <symbol id="i-gpu" viewBox="0 0 64 40"><rect x="2" y="4" width="60" height="26" rx="4" fill="var(--panel)" stroke="var(--ink)" stroke-width="3"/><circle cx="20" cy="17" r="8" fill="none" stroke="var(--ink)" stroke-width="3"/><circle cx="44" cy="17" r="8" fill="none" stroke="var(--ink)" stroke-width="3"/><rect x="8" y="30" width="28" height="6" fill="var(--ink)"/></symbol>
+        <symbol id="i-mac" viewBox="0 0 64 64"><rect x="6" y="18" width="52" height="32" rx="8" fill="var(--panel)" stroke="var(--ink)" stroke-width="3"/><g fill="var(--ink)"><circle cx="20" cy="40" r="1.6"/><circle cx="25" cy="40" r="1.6"/><circle cx="30" cy="40" r="1.6"/><circle cx="35" cy="40" r="1.6"/><circle cx="40" cy="40" r="1.6"/><circle cx="45" cy="40" r="1.6"/></g><rect x="14" y="50" width="36" height="4" rx="2" fill="var(--ink)" opacity=".4"/></symbol>
+        <symbol id="i-cloud" viewBox="0 0 64 64"><path d="M18 46h30a11 11 0 0 0 1-22 15 15 0 0 0-29-3 12 12 0 0 0-2 25z" fill="var(--panel)" stroke="var(--ink)" stroke-width="3" stroke-linejoin="round"/><path d="M33 26v12M27 32h12" stroke="var(--rope-a)" stroke-width="3" stroke-linecap="round"/></symbol>
+        <symbol id="i-hub" viewBox="0 0 64 64"><circle cx="32" cy="32" r="28" fill="var(--deep)"/><path d="M14 34c6-5 12 5 18 0s12 5 18 0" stroke="var(--tile)" stroke-width="3.5" fill="none" stroke-linecap="round"/><path d="M18 25c5-4 9 4 14 0s9 4 14 0" stroke="var(--tile)" stroke-width="3" fill="none" stroke-linecap="round" opacity=".65"/></symbol>
+      </defs>
+
+      <path id="ch-local" class="channel" d="M210 190 C 320 190, 380 200, 466 200"/>
+      <path id="ch-remote" class="channel" d="M534 200 C 620 200, 660 120, 760 120"/>
+      <path id="ch-claude" class="channel" d="M534 200 C 620 200, 660 300, 760 300"/>
+      <path id="ch-gpu" class="channel" d="M160 240 L 160 276"/>
+      <path id="cc-local" class="channel-core" d="M210 190 C 320 190, 380 200, 466 200"/>
+      <path id="cc-remote" class="channel-core off" d="M534 200 C 620 200, 660 120, 760 120"/>
+      <path id="cc-claude" class="channel-core" d="M534 200 C 620 200, 660 300, 760 300"/>
+      <path id="cc-gpu" class="channel-core" d="M160 240 L 160 276"/>
+      <g id="bubbles"></g>
+
+      <g id="n-local">
+        <use href="#i-pc" x="118" y="140" width="84" height="96"/>
+        <circle id="lt-local" cx="196" cy="148" r="8" fill="var(--off)" stroke="var(--panel)" stroke-width="3"/>
+        <text class="node-label" x="160" y="128" text-anchor="middle" id="nm-local">This PC</text>
+        <use href="#i-gpu" x="118" y="276" width="84" height="52"/>
+        <text class="node-sub" x="160" y="348" text-anchor="middle" id="gpu-name">GPU</text>
+        <rect x="110" y="358" width="100" height="8" rx="4" fill="var(--panel)"/>
+        <rect id="gpu-bar" x="110" y="358" width="0" height="8" rx="4" fill="var(--pool)"/>
+        <text class="node-sub" x="160" y="386" text-anchor="middle" id="gpu-stats"></text>
+      </g>
+      <g id="n-hub">
+        <use href="#i-hub" x="462" y="162" width="76" height="76"/>
+        <text class="node-label" x="500" y="266" text-anchor="middle">Router</text>
+        <text class="node-sub" x="500" y="285" text-anchor="middle" id="hub-sub">127.0.0.1:4000</text>
+      </g>
+      <g id="n-remote">
+        <use href="#i-mac" x="760" y="70" width="96" height="96"/>
+        <circle id="lt-remote" cx="850" cy="92" r="8" fill="var(--off)" stroke="var(--panel)" stroke-width="3"/>
+        <text class="node-label" x="868" y="112" id="nm-remote">Mac Studio</text>
+        <text class="node-sub" x="868" y="131" id="sub-remote">not set up</text>
+      </g>
+      <g id="n-claude">
+        <use href="#i-cloud" x="760" y="252" width="96" height="96"/>
+        <circle id="lt-claude" cx="846" cy="282" r="8" fill="var(--off)" stroke="var(--panel)" stroke-width="3"/>
+        <text class="node-label" x="868" y="296">Claude Code</text>
+        <text class="node-sub" x="868" y="315" id="sub-claude">for stuck sessions</text>
+      </g>
+      <text class="flow-num" x="335" y="172" text-anchor="middle" id="f-local">idle</text>
+      <text class="flow-sub" x="335" y="226" text-anchor="middle" id="fs-local"></text>
+      <text class="flow-num" x="582" y="110" text-anchor="middle" id="f-remote"></text>
+      <text class="flow-sub" x="582" y="128" text-anchor="middle" id="fs-remote"></text>
+      <text class="flow-num" x="596" y="300" text-anchor="middle" id="f-claude"></text>
+    </svg>
+  </section>
+
+  <section class="lanes" aria-label="Your machines">
+    <div class="lane" id="lane-local">
+      <span class="light" id="ll-local"></span>
+      <div><h3 id="ln-local">This PC</h3><div class="what">Runs a model on your graphics card. Quick jobs and tab completion.</div></div>
+      <div class="state-col"><div class="state" id="ls-local">Checking…</div><div class="stats" id="lx-local"></div></div>
+      <div class="actions">
+        <button class="btn go big" id="startBtn">Start</button>
+        <button class="btn stop big gone" id="stopBtn">Stop</button>
+        <button class="btn" id="pickBtn">Change model</button>
+      </div>
+      <div class="more gone" id="picker">
+        <div class="panel-inner">
+          <div class="row" style="justify-content:space-between;margin-bottom:8px">
+            <b>Pick a model for this PC</b>
+            <button class="link" id="rescanBtn">Look again</button>
+          </div>
+          <div class="models" id="modelList" role="radiogroup" aria-label="Models found on this PC"></div>
+          <div class="row" style="margin-top:12px">
+            <label for="ctxSel" style="font-size:14px;font-weight:600">Conversation memory</label>
+            <select id="ctxSel" style="width:auto"><option value="8192">8k tokens (light)</option><option value="16384">16k tokens</option><option value="32768">32k tokens</option><option value="65536">64k tokens (heavy)</option></select>
+            <span style="flex:1"></span>
+            <button class="btn" id="pickCancel">Cancel</button>
+            <button class="btn main" id="useModel">Use this model</button>
+          </div>
+          <div class="result" id="pickResult"></div>
+        </div>
+      </div>
+    </div>
+    <div class="rope"></div>
+
+    <div class="lane" id="lane-remote">
+      <span class="light" id="ll-remote"></span>
+      <div><h3 id="ln-remote">Mac Studio</h3><div class="what">Your big-memory machine. Runs the large model for coding agents.</div></div>
+      <div class="state-col"><div class="state" id="ls-remote">Not set up yet</div><div class="stats" id="lx-remote"></div></div>
+      <div class="actions">
+        <button class="btn" id="testRemote">Test</button>
+        <button class="btn" id="editRemote">Set up</button>
+      </div>
+      <div class="more gone" id="remoteForm">
+        <div class="panel-inner">
+          <div class="field"><label for="remoteUrl">Address</label><input type="text" id="remoteUrl" placeholder="mac-studio or 100.64.0.5" autocomplete="off"><span class="hint">The computer's name or IP address. Port 8080 is assumed unless you add one.</span></div>
+          <div class="field"><label for="remoteKey">Password (API key), if it has one</label><input type="password" id="remoteKey" placeholder="Leave empty to keep the current one" autocomplete="off"></div>
+          <div class="field"><label for="remoteName">Name to show</label><input type="text" id="remoteName" placeholder="Mac Studio"></div>
+          <div class="row"><button class="btn" id="formTest">Test</button><span style="flex:1"></span><button class="btn" id="formCancel">Cancel</button><button class="btn main" id="formSave">Save</button></div>
+          <div class="result" id="remoteResult"></div>
+        </div>
+      </div>
+      <div class="more gone result" id="remoteTestOut"></div>
+    </div>
+    <div class="rope"></div>
+
+    <div class="lane" id="lane-claude">
+      <span class="light" id="ll-claude"></span>
+      <div><h3>Claude Code</h3><div class="what">Takes over when a local model gets stuck. Uses your Claude plan.</div></div>
+      <div class="state-col"><div class="state" id="ls-claude"></div><div class="stats" id="lx-claude"></div></div>
+      <div class="actions">
+        <label class="switch"><input type="checkbox" id="handoffSwitch" checked> Hand off stuck sessions</label>
+      </div>
+      <div class="more gone" id="claudeMore"></div>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section class="box" aria-labelledby="connectH">
+      <h2 id="connectH">Connect your coding tools</h2>
+      <p>Point any OpenAI-compatible tool here and choose the model <b>auto</b>.</p>
+      <div class="endpoint"><input type="text" id="endpoint" readonly aria-label="Router address"><button class="btn" id="copyEndpoint">Copy</button></div>
+      <div class="tabs" role="tablist" id="tabs"></div>
+      <div class="row" style="justify-content:space-between;margin-bottom:6px"><span id="snipNote" style="font-size:13.5px;color:var(--quiet)"></span><button class="link" id="copySnip">Copy</button></div>
+      <pre id="snippet"></pre>
+    </section>
+
+    <section class="box" aria-labelledby="logH">
+      <div class="log-head">
+        <h2 id="logH">What's happening</h2>
+        <div class="chips" id="chips">
+          <button aria-pressed="true" data-f="all">Everything</button>
+          <button aria-pressed="false" data-f="request">Requests</button>
+          <button aria-pressed="false" data-f="model">Model output</button>
+          <button aria-pressed="false" data-f="handoff">Handoffs</button>
+          <button aria-pressed="false" data-f="problem">Problems</button>
+        </div>
+      </div>
+      <div class="log" id="log" role="log" aria-live="off"></div>
+      <div class="row" style="margin-top:8px;font-size:13px;color:var(--quiet)">
+        <label class="switch" style="font-size:13px"><input type="checkbox" id="follow" checked> Follow new lines</label>
+        <span style="flex:1"></span>
+        <button class="link" id="openLogs">Open log file</button>
+        <button class="link" id="openSettings">Open settings file</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="foot"><span id="version"></span><span id="uptime"></span></div>
+</div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+let key = ""; try { key = localStorage.getItem("pp-key") || ""; } catch {}
+
+const S = { live: null, status: null, setup: null, picking: false, pickerDismissed: false };
+
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2400); }
+async function copy(text, what = "Copied") {
+  try { await navigator.clipboard.writeText(text); }
+  catch { const a = document.createElement("textarea"); a.value = text; document.body.appendChild(a); a.select(); document.execCommand("copy"); a.remove(); }
+  toast(what);
+}
+async function api(path, body) {
+  const opt = { headers: { "content-type": "application/json" } };
+  if (key) opt.headers.authorization = "Bearer " + key;
+  if (body !== undefined) { opt.method = "POST"; opt.body = JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  if (r.status === 401) {
+    const k = prompt("This router has a password (api_key in its settings). Enter it:");
+    if (k) { key = k.trim(); try { localStorage.setItem("pp-key", key); } catch {} return api(path, body); }
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.error?.message || ("Error " + r.status));
+  return j;
+}
+function setLight(el, s) { el.className = "light " + s; }
+const LIGHT_FILL = { good: "var(--good)", wait: "var(--wait)", bad: "var(--bad)", off: "var(--off)" };
+
+// ------------------------------------------------------------ plain-English status
+function nodesOf(L) { return Object.fromEntries((L.nodes || []).map(n => [n.id, n])); }
+function localState(L) {
+  const m = L.model || {}, node = nodesOf(L).local || {};
+  const ext = S.setup?.local?.external_url;
+  if (ext) return node.online ? ["good", "Ready", node.model] : ["bad", "Can't reach " + ext, node.last_error];
+  switch (m.state) {
+    case "not_set_up": return ["off", "Choose a model to get started", null];
+    case "stopped": return ["off", "Stopped", m.model_name ? m.model_name + " is chosen" : null];
+    case "loading": return ["wait", "Loading the model onto the GPU…", m.model_name];
+    case "running": return node.online ? ["good", "Ready", m.model_name] : ["wait", "Starting up…", m.model_name];
+    case "crashed": return ["bad", "Stopped unexpectedly", m.detail];
+    default: return ["off", "Checking…", null];
+  }
+}
+function remoteState(L) {
+  const n = nodesOf(L).remote || {};
+  if (!n.configured) return ["off", "Not set up yet", "Add it once it's on your network."];
+  if (n.online) return ["good", "Connected", n.model];
+  return ["bad", "Not reachable", n.last_error];
+}
+function claudeState(L) {
+  if (L.paused) return ["wait", "Handoffs are paused", "Stuck sessions keep trying on your own machines."];
+  return ["good", "Ready to take over", L.sessions_with_strikes ? `${L.sessions_with_strikes} session${L.sessions_with_strikes > 1 ? "s are" : " is"} struggling` : "No session is stuck"];
+}
+function overall(L) {
+  const [ls] = localState(L), [rs] = remoteState(L);
+  const rn = nodesOf(L).remote || {};
+  const rname = rn.name || "The remote machine";
+  if (L.model?.state === "not_set_up" && !rn.configured && !S.setup?.local?.external_url) return ["wait", "Pick a model for this PC to get started."];
+  if (ls === "bad") return ["bad", "This PC's model stopped. The details are below; press Start again when ready."];
+  if (rn.configured && rs === "bad") return ["bad", `${rname} isn't reachable, so coding agents can't run. Chat still works on this PC.`];
+  if (ls === "wait") return ["wait", "Loading the model. The first time takes a minute."];
+  if (ls === "off" && !rn.configured) return ["wait", "This PC's model isn't running. Press Start."];
+  if (ls === "off") return ["good", `Working through ${rname}. This PC's model is off, so tab completion is off too.`];
+  return ["good", rn.configured ? "Everything's working. Both machines are online." : "Everything's working on this PC."];
+}
+
+function fmtRate(t) {
+  if (!t) return ["idle", ""];
+  const head = t.tokens_per_sec > 0 ? `${Math.round(t.tokens_per_sec)} tokens/s` : (t.in_flight > 0 ? "thinking…" : "idle");
+  const sub = [];
+  if (t.in_flight > 0) sub.push(`${t.in_flight} working`);
+  if (t.requests_per_min > 0) sub.push(`${t.requests_per_min} in the last minute`);
+  return [head, sub.join(", ")];
+}
+function fmtDur(s) { if (s < 60) return s + "s"; if (s < 3600) return Math.floor(s / 60) + " min"; return Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min"; }
+
+function renderLive(L) {
+  S.live = L;
+  const loc = localState(L), rem = remoteState(L), cl = claudeState(L), ov = overall(L);
+  setLight($("overallLight"), ov[0]); $("overallText").textContent = ov[1];
+  document.title = (ov[0] === "bad" ? "Problem: " : "") + "PoolParty Router";
+
+  const N = nodesOf(L);
+  const lname = N.local?.name || "This PC", rname = N.remote?.name || "Remote machine";
+  $("ln-local").textContent = lname; $("nm-local").textContent = lname;
+  $("ln-remote").textContent = rname; $("nm-remote").textContent = rname;
+
+  for (const [id, st] of [["local", loc], ["remote", rem], ["claude", cl]]) {
+    setLight($("ll-" + id), st[0]);
+    $("lt-" + id).setAttribute("fill", LIGHT_FILL[st[0]]);
+    $("ls-" + id).innerHTML = `<b>${esc(st[1])}</b>`;
+    $("lx-" + id).textContent = st[2] || "";
+  }
+  const m = L.model || {};
+  const active = m.state === "running" || m.state === "loading";
+  const ext = !!S.setup?.local?.external_url;
+  $("startBtn").classList.toggle("gone", active || ext);
+  $("stopBtn").classList.toggle("gone", !active || ext);
+  $("pickBtn").classList.toggle("gone", ext);
+  $("startBtn").textContent = m.state === "crashed" ? "Start again" : "Start";
+  $("startBtn").disabled = m.state === "not_set_up";
+  if (m.state === "running" && m.uptime_secs != null) $("lx-local").textContent = `${m.model_name}, running for ${fmtDur(m.uptime_secs)}`;
+  if (m.state === "not_set_up" && !S.picking && !S.pickerDismissed && S.setup) openPicker();
+
+  const rn = N.remote || {};
+  $("testRemote").classList.toggle("gone", !rn.configured);
+  $("editRemote").textContent = rn.configured ? "Change" : "Set up";
+  if (rn.online) $("lx-remote").textContent = [rn.model, rn.latency_ms != null ? `${rn.latency_ms} ms away` : ""].filter(Boolean).join(", ");
+  const short = t => t && t.length > 16 ? t.slice(0, 15) + "…" : t;
+  $("sub-remote").textContent = rn.configured ? (rn.online ? (short(rn.model) || "connected") : "not reachable") : "not set up";
+
+  $("handoffSwitch").checked = !L.paused;
+  $("sub-claude").textContent = L.paused ? "handoffs paused" : "for stuck sessions";
+  $("cc-claude").setAttribute("class", "channel-core" + (L.paused ? " off" : ""));
+
+  const tr = L.traffic || {};
+  for (const id of ["local", "remote"]) {
+    const [a, b] = fmtRate(tr[id]);
+    const up = id === "local" ? loc[0] === "good" : rem[0] === "good";
+    const notSetUp = id === "remote" && !rn.configured;
+    $("f-" + id).textContent = up ? a : (notSetUp ? "" : "offline");
+    $("fs-" + id).textContent = up ? b : "";
+    $("cc-" + id).setAttribute("class", "channel-core" + (up ? (tr[id]?.in_flight || tr[id]?.tokens_per_sec ? " live" : "") : " off"));
+  }
+  $("cc-gpu").setAttribute("class", "channel-core" + (loc[0] === "good" ? (tr.local?.tokens_per_sec ? " live" : "") : " off"));
+  $("f-claude").textContent = tr.claude?.requests ? `${tr.claude.requests} handed off` : "";
+
+  const g = L.gpu;
+  if (g) {
+    $("gpu-name").textContent = g.name;
+    $("gpu-bar").setAttribute("width", Math.round(Math.min(100, g.utilization)));
+    $("gpu-stats").textContent = `${g.utilization}% busy, ${g.memory_used_gb.toFixed(1)} of ${g.memory_total_gb.toFixed(0)} GB used`;
+  }
+  $("uptime").textContent = L.uptime_secs != null ? "Router running for " + fmtDur(L.uptime_secs) : "";
+  rates = { local: tr.local?.tokens_per_sec || 0, remote: tr.remote?.tokens_per_sec || 0,
+            localBusy: tr.local?.in_flight || 0, remoteBusy: tr.remote?.in_flight || 0 };
+}
+
+// ------------------------------------------------------------ Claude lane details
+function renderClaude() {
+  const st = S.status; if (!st) return;
+  const sess = (st.session_list || []).filter(s => s.strikes > 0).slice(0, 4);
+  const max = st.escalation?.strikes_to_escalate || 3;
+  const latest = (st.handoffs || [])[0];
+  let h = "";
+  if (latest) {
+    h += `<div class="panel-inner"><div class="row"><span style="flex:1;min-width:220px">Latest handoff ${esc(latest.modified)}. Run the Claude command in your project folder to carry on.</span>
+      <button class="btn main" data-copy-cmd>Copy Claude command</button><button class="btn" data-open="${esc(latest.path)}">Show file</button></div></div>`;
+  }
+  if (sess.length) {
+    h += `<ul class="sessions">${sess.map(s => `<li><span class="dots" title="${s.strikes} of ${max} strikes">${Array.from({length: max}, (_, i) => `<i class="${i < s.strikes ? "hit" : ""}"></i>`).join("")}</span>
+      <span class="task" title="${esc(s.reasons.join("; "))}">${esc(s.task || "Coding session")}</span>
+      <button class="link" data-esc="${esc(s.id)}">Hand off now</button></li>`).join("")}</ul>`;
+  }
+  const box = $("claudeMore");
+  box.innerHTML = h; box.classList.toggle("gone", !h);
+  const cc = box.querySelector("[data-copy-cmd]"); if (cc) cc.onclick = () => copy(latest.command, "Claude command copied");
+  const so = box.querySelector("[data-open]"); if (so) so.onclick = () => api("/router/open", { what: "handoff", path: so.dataset.open }).catch(e => toast(e.message));
+  box.querySelectorAll("[data-esc]").forEach(b => b.onclick = async () => {
+    await api("/router/escalate", { session: b.dataset.esc }); toast("It hands off on its next step"); });
+}
+
+// ------------------------------------------------------------ model picker
+let chosen = "";
+function openPicker() {
+  S.picking = true; $("picker").classList.remove("gone");
+  const st = S.setup || {}, list = st.models || [];
+  chosen = chosen || st.local_model?.model || (list.find(m => m.fits_gpu) || list[0] || {}).path || "";
+  const ctx = String(st.local_model?.context || 16384);
+  $("ctxSel").value = [...$("ctxSel").options].some(o => o.value === ctx) ? ctx : "16384";
+  if (!list.length) {
+    $("modelList").innerHTML = `<div style="padding:14px">No models found yet. Download a .gguf model (LM Studio is the easiest way), then press <b>Look again</b>.</div>`;
+  } else {
+    $("modelList").innerHTML = list.map(m => `<label class="model"><input type="radio" name="mdl" value="${esc(m.path)}" ${m.path === chosen ? "checked" : ""}>
+      <span class="name" title="${esc(m.path)}">${esc(m.name)}</span><span class="size">${m.size_gb} GB</span>
+      ${m.fits_gpu == null ? "" : `<span class="fit ${m.fits_gpu ? "yes" : "no"}">${m.fits_gpu ? "fits your GPU" : "too big for your GPU"}</span>`}</label>`).join("");
+    $("modelList").querySelectorAll("input").forEach(i => i.onchange = () => { chosen = i.value; });
+  }
+  const ls = st.llama_server_in_use;
+  $("pickResult").className = "result" + (ls ? "" : " err");
+  $("pickResult").textContent = ls ? "" : "llama-server wasn't found on this PC. Download a Windows CUDA build from github.com/ggml-org/llama.cpp/releases, unzip it to C:\\llama, then press Look again.";
+}
+function closePicker() { S.picking = false; S.pickerDismissed = true; $("picker").classList.add("gone"); }
+$("pickBtn").onclick = () => S.picking ? closePicker() : openPicker();
+$("pickCancel").onclick = closePicker;
+$("rescanBtn").onclick = async () => { toast("Looking for models…"); try { S.setup = await api("/router/discover", {}); openPicker(); } catch (e) { toast(e.message); } };
+$("useModel").onclick = async () => {
+  if (!chosen) { toast("Pick a model first"); return; }
+  $("useModel").disabled = true;
+  try {
+    await api("/router/settings", { local_model: { model: chosen, context: +$("ctxSel").value } });
+    await api("/router/model/start", {});
+    closePicker(); toast("Starting the model");
+    S.setup = await api("/router/setup");
+  } catch (e) { $("pickResult").className = "result err"; $("pickResult").textContent = e.message; }
+  finally { $("useModel").disabled = false; }
+};
+$("startBtn").onclick = async () => { try { await api("/router/model/start", {}); toast("Starting the model"); } catch (e) { toast(e.message); } };
+$("stopBtn").onclick = async () => { try { await api("/router/model/stop", {}); toast("Model stopped"); } catch (e) { toast(e.message); } };
+
+// ------------------------------------------------------------ remote form
+$("editRemote").onclick = () => {
+  const r = S.setup?.remote || {};
+  $("remoteUrl").value = r.url || ""; $("remoteName").value = r.name || ""; $("remoteKey").value = "";
+  $("remoteResult").textContent = ""; $("remoteTestOut").classList.add("gone");
+  $("remoteForm").classList.toggle("gone");
+  if (!$("remoteForm").classList.contains("gone")) $("remoteUrl").focus();
+};
+$("formCancel").onclick = () => $("remoteForm").classList.add("gone");
+async function runTest(body, out) {
+  out.classList.remove("gone"); out.className = out.className.replace(/\b(ok|err)\b/g, "").trim(); out.textContent = "Testing…";
+  try { const r = await api("/router/test", body); out.classList.add(r.ok ? "ok" : "err"); out.textContent = r.message; return r; }
+  catch (e) { out.classList.add("err"); out.textContent = e.message; }
+}
+$("formTest").onclick = () => runTest({ node: "remote", url: $("remoteUrl").value, api_key: $("remoteKey").value }, $("remoteResult"));
+$("testRemote").onclick = () => { $("remoteForm").classList.add("gone"); runTest({ node: "remote" }, $("remoteTestOut")); };
+$("formSave").onclick = async () => {
+  const body = { remote: { url: $("remoteUrl").value, name: $("remoteName").value } };
+  if ($("remoteKey").value.trim()) body.remote.api_key = $("remoteKey").value.trim();
+  try { await api("/router/settings", body); S.setup = await api("/router/setup"); $("remoteForm").classList.add("gone"); toast("Saved"); }
+  catch (e) { $("remoteResult").className = "result err"; $("remoteResult").textContent = e.message; }
+};
+
+// ------------------------------------------------------------ top bar
+$("handoffSwitch").onchange = async e => { await api("/router/mode", { paused: !e.target.checked }); toast(e.target.checked ? "Handoffs are on" : "Handoffs paused"); };
+$("autostart").onchange = async e => { try { await api("/router/autostart", { enabled: e.target.checked }); toast(e.target.checked ? "Starts with Windows" : "Won't start with Windows"); } catch (err) { toast(err.message); e.target.checked = !e.target.checked; } };
+$("quitBtn").onclick = async () => {
+  if (!confirm("Quit PoolParty Router? Coding tools stop working until you open it again.")) return;
+  await api("/router/quit", {}).catch(() => {});
+  document.body.innerHTML = `<div class="wrap" style="padding-top:80px;text-align:center"><h2>PoolParty Router has quit.</h2><p style="color:var(--quiet)">You can close this window.</p></div>`;
+};
+$("openLogs").onclick = () => api("/router/open", { what: "logs" }).catch(e => toast(e.message));
+$("openSettings").onclick = () => api("/router/open", { what: "settings" }).catch(e => toast(e.message));
+
+// ------------------------------------------------------------ connect snippets
+let endpoint = location.origin + "/v1";
+const SNIPS = {
+  "OpenCode": () => ["Save as opencode.json in your project:", JSON.stringify({ "$schema": "https://opencode.ai/config.json",
+      provider: { poolparty: { npm: "@ai-sdk/openai-compatible", name: "PoolParty", options: Object.assign({ baseURL: endpoint }, key ? { apiKey: key } : {}),
+      models: { auto: { name: "PoolParty auto" } } } }, model: "poolparty/auto" }, null, 2)],
+  "Pi": () => ["Add to Pi's models.json (usually in ~/.pi/agent/):", JSON.stringify({ providers: { poolparty: { baseUrl: endpoint, api: "openai-completions",
+      apiKey: key || "none", models: [{ id: "auto", name: "PoolParty auto" }] } } }, null, 2)],
+  "Continue / Kilo Code": () => ["Add an OpenAI-compatible provider:", `Base URL: ${endpoint}\nModel:    auto\nAPI key:  ${key || "(anything)"}\n\nFor tab completion, use the model "local".`],
+  "Unsloth Studio": () => ["Add connection, choose llama.cpp, and paste:", endpoint],
+};
+let tab = "OpenCode";
+function renderTabs() {
+  $("tabs").innerHTML = Object.keys(SNIPS).map(t => `<button role="tab" aria-selected="${t === tab}" data-t="${esc(t)}">${esc(t)}</button>`).join("");
+  $("tabs").querySelectorAll("button").forEach(b => b.onclick = () => { tab = b.dataset.t; renderTabs(); });
+  const [note, code] = SNIPS[tab](); $("snipNote").textContent = note; $("snippet").textContent = code;
+  $("copySnip").onclick = () => copy(code);
+}
+$("copyEndpoint").onclick = () => copy(endpoint, "Address copied");
+
+// ------------------------------------------------------------ verbose log
+const logEl = $("log"); let filter = "all";
+function logLine(l) {
+  const d = document.createElement("div");
+  d.className = l.level; d.dataset.s = l.source;
+  d.innerHTML = `<span class="t">${esc(l.time)}</span><span class="s src-${esc(l.source)}">${esc(l.source)}</span><span class="m">${esc(l.message)}</span>`;
+  d.hidden = !matches(d);
+  logEl.appendChild(d);
+  while (logEl.childElementCount > 800) logEl.firstElementChild.remove();
+  if ($("follow").checked && !d.hidden) logEl.scrollTop = logEl.scrollHeight;
+}
+function matches(d) {
+  if (filter === "all") return true;
+  if (filter === "problem") return d.classList.contains("warn") || d.classList.contains("error");
+  return d.dataset.s === filter;
+}
+$("chips").querySelectorAll("button").forEach(b => b.onclick = () => {
+  filter = b.dataset.f;
+  $("chips").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  for (const d of logEl.children) d.hidden = !matches(d);
+  logEl.scrollTop = logEl.scrollHeight;
+});
+
+// ------------------------------------------------------------ map animation
+let rates = { local: 0, remote: 0, localBusy: 0, remoteBusy: 0 };
+const bubbles = [];
+const paths = { local: $("ch-local"), remote: $("ch-remote"), claude: $("ch-claude"), gpu: $("ch-gpu") };
+const lens = Object.fromEntries(Object.entries(paths).map(([k, p]) => [k, p.getTotalLength()]));
+const layer = $("bubbles");
+// Paths run PC->router, router->remote, router->Claude, PC->GPU. "out" is the
+// direction a request travels on each one; answers flow the other way.
+const OUT = { local: -1, remote: 1, claude: 1, gpu: 1 };
+function spawn(link, dir, cls, r) {
+  if (reduceMotion || bubbles.length > 160) return;
+  const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  c.setAttribute("r", r); c.setAttribute("class", "bubble " + cls); c.setAttribute("opacity", 0);
+  layer.appendChild(c);
+  bubbles.push({ el: c, link, dir, t: 0, speed: cls ? 0.9 : 0.5 + Math.random() * 0.25, wob: Math.random() * 6.28 });
+}
+const acc = { local: 0, remote: 0 }; let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  for (const k of ["local", "remote"]) {
+    const tps = rates[k];
+    const perSec = tps > 0 ? Math.min(14, 2 + tps / 5) : (rates[k + "Busy"] ? 0.8 : 0);
+    acc[k] += perSec * dt;
+    while (acc[k] >= 1) {
+      acc[k] -= 1;
+      spawn(k, -OUT[k], "", 3 + Math.random() * 2.5);
+      if (k === "local" && tps > 0) spawn("gpu", -OUT.gpu, "", 2.5 + Math.random() * 1.5);
+    }
+  }
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i]; b.t += dt * b.speed;
+    if (b.t >= 1) { b.el.remove(); bubbles.splice(i, 1); continue; }
+    const pos = b.dir > 0 ? b.t : 1 - b.t;
+    const p = paths[b.link].getPointAtLength(pos * lens[b.link]);
+    b.el.setAttribute("cx", p.x); b.el.setAttribute("cy", p.y + Math.sin(b.t * 12 + b.wob) * 2.2);
+    b.el.setAttribute("opacity", Math.min(1, (1 - b.t) * 3, b.t * 6));
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ------------------------------------------------------------ live events
+function connect() {
+  const es = new EventSource("/router/events" + (key ? "?key=" + encodeURIComponent(key) : ""));
+  es.onmessage = e => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type === "tick") renderLive(m.data);
+    else if (m.type === "log") logLine(m.data);
+    else if (m.type === "request") {
+      const r = m.data.route;
+      if (r === "local" || r === "remote") spawn(r, OUT[r], "req", 6);
+      if (r === "claude") spawn("claude", OUT.claude, "handoff", 7);
+    } else if (m.type === "handoff") { toast("A stuck session was handed off to Claude Code"); refreshStatus(); }
+  };
+  es.onerror = () => { setLight($("overallLight"), "bad"); $("overallText").textContent = "Lost contact with the router. Retrying…"; };
+}
+async function refreshStatus() {
+  try {
+    S.status = await api("/status");
+    endpoint = S.status.endpoint || endpoint;
+    $("endpoint").value = endpoint;
+    $("version").textContent = "Version " + S.status.version;
+    $("hub-sub").textContent = endpoint.replace(/^https?:\/\//, "").replace(/\/v1$/, "");
+    renderClaude(); renderTabs();
+  } catch {}
+}
+(async function init() {
+  try {
+    S.setup = await api("/router/setup");
+    if (S.setup.autostart !== null && S.setup.autostart !== undefined) { $("autostartWrap").classList.remove("gone"); $("autostart").checked = S.setup.autostart; }
+  } catch {}
+  await refreshStatus();
+  if (S.status) renderLive(S.status);
+  connect();
+  setInterval(refreshStatus, 5000);
+})();
+</script>
+</body>
+</html>

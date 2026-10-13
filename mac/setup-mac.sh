@@ -63,8 +63,9 @@ echo "llama-server is starting (large models take a minute to load)."
 echo "Log:   tail -f ~/Library/Logs/poolparty-llama-server.log"
 echo "Check: curl -s -H 'Authorization: Bearer $KEY' http://localhost:$PORT/v1/models"
 echo
-echo "Put this in router.toml on jayspc:"
+echo "Now, in PoolParty Router on your PC: Mac Studio -> Set up, then enter"
 echo
-echo "[nodes.mac]"
-echo "url = \"http://$(scutil --get LocalHostName 2>/dev/null || hostname -s):$PORT/v1\"   # or the Mac's Tailscale name"
-echo "api_key = \"$KEY\""
+echo "  Address:  $(scutil --get LocalHostName 2>/dev/null || hostname -s).local:$PORT   (or the Mac's Tailscale name/IP)"
+echo "  Password: $KEY"
+echo
+echo "and press Test, then Save."

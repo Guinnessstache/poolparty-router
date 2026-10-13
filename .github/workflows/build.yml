@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "PoolParty-Router"
+          New-Item -ItemType Directory -Force $out, "$out/mac", "$out/scripts" | Out-Null
+          Copy-Item target/release/poolparty-router.exe "$out/PoolParty Router.exe"
+          Copy-Item README.md, LICENSE, router.example.toml, SETUP-AND-TEST.cmd, STOP.cmd $out
+          Copy-Item mac/* "$out/mac"
+          Copy-Item scripts/setup-and-test.ps1 "$out/scripts"
+          Compress-Archive -Path "$out/*" -DestinationPath PoolParty-Router-windows-x64.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PoolParty-Router-windows-x64
+          path: PoolParty-Router-windows-x64.zip
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PoolParty-Router-windows-x64.zip
+          generate_release_notes: true

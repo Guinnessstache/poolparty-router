@@ -29,7 +29,8 @@ $onWindows = $env:OS -eq 'Windows_NT'
 $root    = Split-Path $PSScriptRoot -Parent
 $testDir = Join-Path $root 'test'
 $pidFile = Join-Path $testDir 'running.pids'
-$exe     = Join-Path $root ('target/release/poolparty-router' + $(if ($onWindows) { '.exe' } else { '' }))
+$packaged = Join-Path $root 'PoolParty Router.exe'   # the downloaded app
+$exe     = if (Test-Path $packaged) { $packaged } else { Join-Path $root ('target/release/poolparty-router' + $(if ($onWindows) { '.exe' } else { '' })) }
 New-Item -ItemType Directory -Force -Path $testDir | Out-Null
 
 function Say($msg, $color = 'Gray') { Write-Host $msg -ForegroundColor $color }
@@ -37,6 +38,11 @@ function Step($msg) { Write-Host ''; Write-Host "== $msg" -ForegroundColor Cyan 
 
 # ---------------------------------------------------------------- stop
 function Stop-Started {
+    # Ask nicely first so the router also stops the model it started.
+    foreach ($port in $RouterPort, ($RouterPort + 1)) {
+        try { Invoke-WebRequest "http://127.0.0.1:$port/router/quit" -Method Post -Body '{}' -ContentType 'application/json' -UseBasicParsing -TimeoutSec 3 | Out-Null } catch {}
+    }
+    Start-Sleep -Milliseconds 800
     if (Test-Path $pidFile) {
         foreach ($id in Get-Content $pidFile) {
             if ($id -match '^\d+$') { Stop-Process -Id ([int]$id) -Force -ErrorAction SilentlyContinue }
@@ -133,9 +139,9 @@ Say ("  {0}  ({1:N1} GB)" -f $Model, ((Get-Item $Model).Length / 1GB))
 Step 'Building the router'
 $cargo = Get-Command cargo -ErrorAction SilentlyContinue
 $cargo = if ($cargo) { $cargo.Source } else { Join-Path $home_ '.cargo\bin\cargo.exe' }
-$newest = Get-ChildItem (Join-Path $root 'src'), (Join-Path $root 'Cargo.toml') -Recurse -File |
+$newest = Get-ChildItem (Join-Path $root 'src'), (Join-Path $root 'Cargo.toml') -Recurse -File -ErrorAction SilentlyContinue |
           Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not (Test-Path $exe) -or $newest.LastWriteTime -gt (Get-Item $exe).LastWriteTime) {
+if ($exe -eq $packaged) { Say '  Using the downloaded app' } elseif (-not (Test-Path $exe) -or $newest.LastWriteTime -gt (Get-Item $exe).LastWriteTime) {
     if (-not (Test-Path $cargo)) { throw 'Rust (cargo) not found. Install it from rustup.rs.' }
     Push-Location $root
     try { & $cargo build --release; if ($LASTEXITCODE -ne 0) { throw 'cargo build failed (see above).' } }
@@ -155,42 +161,71 @@ foreach ($port in $RouterPort, $ModelPort) {
 $handoffs = Join-Path $testDir 'handoffs'
 $cfgMain = Join-Path $testDir 'router.test.toml'
 $cfgDown = Join-Path $testDir 'router.mac-down.toml'
-$toml = {
-    param($port, $macUrl, $log)
+$fwd = { param($p) $p -replace '\\', '/' }
+# Main test router: runs the model itself; the remote ("Mac") slot points at the
+# same model until the real Mac arrives.
 @"
-# Written by setup-and-test.ps1. The Mac slot points at the 4070 Ti until the Mac arrives.
+# Written by setup-and-test.ps1.
 [router]
-listen = ["127.0.0.1:$port"]
+listen = ["127.0.0.1:$RouterPort"]
 poll_seconds = 2
-log_file = "$log"
+log_file = "router.log"
 
-[nodes.mac]
-url = "$macUrl"
+[nodes.local]
+name = "This PC"
 
-[nodes.jayspc]
+[nodes.remote]
+name = "Mac Studio (stand-in)"
 url = "http://127.0.0.1:$ModelPort/v1"
+
+[local_model]
+model = "$(& $fwd $Model)"
+llama_server = "$(& $fwd $LlamaServer)"
+context = $Context
+port = $ModelPort
+autostart = true
 
 [escalation]
 mode = "handoff"
 strikes_to_escalate = 3
-handoff_dir = "$($handoffs -replace '\\', '/')"
-"@
-}
-Set-Content $cfgMain (& $toml $RouterPort "http://127.0.0.1:$ModelPort/v1" 'router.log') -Encoding ASCII
-Set-Content $cfgDown (& $toml ($RouterPort + 1) 'http://127.0.0.1:9/v1' 'router.mac-down.log') -Encoding ASCII
+handoff_dir = "$(& $fwd $handoffs)"
+"@ | Set-Content $cfgMain -Encoding ASCII
 
-Start-Bg $LlamaServer @('-m', "`"$Model`"", '-ngl', '99', '-c', "$Context", '--jinja',
-                        '--host', '127.0.0.1', '--port', "$ModelPort") 'llama-server' | Out-Null
+# Second router for the "Mac offline" checks: uses the running model as This PC
+# without starting another copy, and points the Mac slot nowhere.
+@"
+[router]
+listen = ["127.0.0.1:$($RouterPort + 1)"]
+poll_seconds = 2
+log_file = "router.mac-down.log"
+
+[nodes.local]
+url = "http://127.0.0.1:$ModelPort/v1"
+
+[nodes.remote]
+name = "Mac Studio (offline)"
+url = "http://127.0.0.1:9/v1"
+
+[local_model]
+autostart = false
+
+[escalation]
+handoff_dir = "$(& $fwd $handoffs)"
+"@ | Set-Content $cfgDown -Encoding ASCII
+
+Start-Bg $exe @("`"$cfgMain`"", '--background') 'router' | Out-Null
+if (-not (Wait-For 'Router' "http://127.0.0.1:$RouterPort/health" 30)) { throw 'Router failed to start; see test\router.log' }
 Say '  Loading the model on the GPU (can take a minute)...'
-if (-not (Wait-For 'Model' "http://127.0.0.1:$ModelPort/health" 300)) {
-    Say "  The model didn't come up. Last lines of test\llama-server.err.log:" Red
-    Get-Content (Join-Path $testDir 'llama-server.err.log') -Tail 15 -ErrorAction SilentlyContinue
-    throw 'llama-server failed to start.'
+$sw = [Diagnostics.Stopwatch]::StartNew(); $state = ''
+while ($sw.Elapsed.TotalSeconds -lt 300) {
+    $st = (Invoke-WebRequest "http://127.0.0.1:$RouterPort/status" -UseBasicParsing).Content | ConvertFrom-Json
+    $state = $st.model.state
+    if ($state -eq 'running' -and @($st.nodes | Where-Object { $_.online }).Count -eq 2) { break }
+    if ($state -eq 'crashed') { throw "The model stopped: $($st.model.detail)" }
+    Start-Sleep -Seconds 2
 }
-Start-Bg $exe @("`"$cfgMain`"") 'router' | Out-Null
-if (-not (Wait-For 'Router' "http://127.0.0.1:$RouterPort/health" 30)) { throw 'Router failed to start; see test\router.err.log' }
-# Give the router one poll to see the nodes.
-Start-Sleep -Seconds 3
+if ($state -ne 'running') { throw "The model didn't finish loading in 5 minutes (state: $state). See test\router.log" }
+Say "  Model is ready ($([int]$sw.Elapsed.TotalSeconds)s)" Green
 
 # ---------------------------------------------------------------- 5. tests
 $results = New-Object System.Collections.ArrayList
@@ -206,16 +241,16 @@ if (-not $NoTests) {
 
     $st = (Invoke-WebRequest "http://127.0.0.1:$RouterPort/status" -UseBasicParsing).Content | ConvertFrom-Json
     $online = @($st.nodes | Where-Object { $_.online }).Count
-    Check 'Router sees both node slots online' ($online -eq 2) "$online of 2 online"
+    Check 'Router sees both machine slots online' ($online -eq 2) "$online of 2 online"
 
     $r = Send '/v1/completions' @{ model = 'auto'; prompt = 'def add(a, b):'; max_tokens = 16 }
-    Check 'Tab completion goes to the 4070 Ti' ($r.Status -eq 200 -and $r.Node -eq 'jayspc') "status $($r.Status), went to '$($r.Node)'"
+    Check 'Tab completion goes to this PC' ($r.Status -eq 200 -and $r.Node -eq 'local') "status $($r.Status), went to '$($r.Node)'"
 
     $r = Send '/v1/chat/completions' @{ model = 'auto'; max_tokens = 128; chat_template_kwargs = $noThink
                                         messages = @(@{ role = 'user'; content = 'Reply with the single word: ready' }) }
     $answer = ''
     try { $j = $r.Body | ConvertFrom-Json; $answer = "$($j.choices[0].message.content)$($j.choices[0].message.reasoning_content)" } catch {}
-    Check 'Chat goes to the Mac slot and the model answers' ($r.Status -eq 200 -and $r.Node -eq 'mac' -and $answer.Trim()) "status $($r.Status), node '$($r.Node)', answer '$($answer.Trim())'"
+    Check 'Chat goes to the Mac slot and the model answers' ($r.Status -eq 200 -and $r.Node -eq 'remote' -and $answer.Trim()) "status $($r.Status), node '$($r.Node)', answer '$($answer.Trim())'"
 
     $r = Send '/v1/chat/completions' @{ model = 'auto'; stream = $true; max_tokens = 16; chat_template_kwargs = $noThink
                                         messages = @(@{ role = 'user'; content = 'Count to three.' }) }
@@ -260,12 +295,12 @@ if (-not $NoTests) {
     Check 'Dashboard "Hand off" button works' ($r.Node -eq 'claude-code') "went to '$($r.Node)'"
 
     # Mac offline: a second router whose Mac slot points nowhere.
-    $down = Start-Bg $exe @("`"$cfgDown`"") 'router-mac-down'
+    $down = Start-Bg $exe @("`"$cfgDown`"", '--background') 'router-mac-down'
     if (Wait-For 'Mac-offline router' "http://127.0.0.1:$($RouterPort + 1)/health" 30) {
         Start-Sleep -Seconds 3
         $r = Send '/v1/chat/completions' @{ model = 'auto'; max_tokens = 8; chat_template_kwargs = $noThink
                                             messages = @(@{ role = 'user'; content = 'hi' }) } @{} ($RouterPort + 1)
-        Check 'Mac offline: chat falls back to the 4070 Ti' ($r.Node -eq 'jayspc') "went to '$($r.Node)' (status $($r.Status))"
+        Check 'Mac offline: chat falls back to this PC' ($r.Node -eq 'local') "went to '$($r.Node)' (status $($r.Status))"
         $r = Send '/v1/chat/completions' @{ model = 'auto'; max_tokens = 8; tools = $tools
                                             messages = @(@{ role = 'user'; content = 'build it' }) } @{} ($RouterPort + 1)
         Check 'Mac offline: agent turns are refused, not downgraded' ($r.Status -eq 503) "status $($r.Status)"

@@ -1,40 +1,65 @@
-//! PoolParty router: one OpenAI-compatible endpoint in front of the Mac
-//! Studio, the RTX 4070 Ti and a Claude Code handoff.
+//! PoolParty Router: one OpenAI-compatible endpoint in front of this PC's GPU,
+//! a big remote machine (e.g. a Mac Studio) and a Claude Code handoff, with
+//! a desktop app UI to run it all.
+
+// Release builds on Windows are a windowed app: no console window.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod classify;
 mod config;
 mod escalation;
 mod handoff;
 mod nodes;
+mod supervisor;
+mod sys;
+mod telemetry;
 
 use axum::{
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, Uri},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
 use classify::{decide, Decision, Kind, Target};
 use config::{Config, NodeCfg};
 use escalation::Session;
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use telemetry::{events, Traffic};
 
 struct App {
-    cfg: Config,
+    cfg: Arc<RwLock<Config>>,
+    cfg_path: PathBuf,
     http: reqwest::Client,
     nodes: nodes::Registry,
+    model: supervisor::Supervisor,
+    traffic: Arc<Traffic>,
+    gpu: Mutex<Option<sys::Gpu>>,
+    models: Mutex<Vec<sys::ModelFile>>,
     sessions: Mutex<HashMap<String, Session>>,
-    /// Session ids with a manual escalation pending.
+    /// Session ids with a manual handoff pending.
     forced: Mutex<Vec<String>>,
     activity: Mutex<VecDeque<Activity>>,
-    /// Runtime switch from the dashboard; starts from escalation.mode.
     handoffs_paused: AtomicBool,
+    started: Instant,
+}
+
+impl App {
+    fn cfg(&self) -> Config {
+        self.cfg.read().unwrap().clone()
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -51,75 +76,212 @@ struct Activity {
 
 type Shared = Arc<App>;
 
+struct Args {
+    config: Option<PathBuf>,
+    background: bool,
+}
+
+fn parse_args() -> Args {
+    let mut a = Args { config: None, background: false };
+    let mut it = std::env::args().skip(1);
+    while let Some(x) = it.next() {
+        match x.as_str() {
+            "--background" | "--no-window" => a.background = true,
+            "--config" => a.config = it.next().map(PathBuf::from),
+            other if !other.starts_with("--") => a.config = Some(PathBuf::from(other)),
+            _ => {}
+        }
+    }
+    a
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let path = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("router.toml"));
-    if !path.exists() {
-        std::fs::write(&path, include_str!("../router.example.toml"))?;
-        println!("Wrote a starter config to {}. Edit the node URLs, then run again.", path.display());
-        return Ok(());
-    }
-    let cfg = Config::load(&path)?;
+    let args = parse_args();
+    // Settings: the path given, else router.toml here (for developers), else
+    // the app's own folder.
+    let cfg_path = args.config.clone().unwrap_or_else(|| {
+        let here = PathBuf::from("router.toml");
+        if here.is_file() { here } else { sys::app_dir().join("router.toml") }
+    });
+    let cfg = Config::load_or_create(&cfg_path)?;
     init_logging(cfg.router.log_file.as_deref())?;
 
-    let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).build()?;
-    let registry = nodes::Registry::new(&cfg.nodes.mac, &cfg.nodes.jayspc);
-    registry.spawn_poller(
-        http.clone(),
-        [(Target::Mac, cfg.nodes.mac.clone()), (Target::Jayspc, cfg.nodes.jayspc.clone())],
-        Duration::from_secs(cfg.router.poll_seconds.max(1)),
-    );
-
     let listen = cfg.router.listen.clone();
+    let ui_url = format!("http://{}/", listen.first().cloned().unwrap_or_else(|| "127.0.0.1:4000".into()));
+
+    // Bind first: if another copy is already running, just show its window.
+    let mut listeners = Vec::new();
+    for addr in &listen {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => listeners.push((addr.clone(), l)),
+            Err(e) => {
+                let health = format!("http://{addr}/health");
+                let running = reqwest::get(&health).await.map(|r| r.status().is_success()).unwrap_or(false);
+                if running {
+                    tracing::info!(target: "router", "already running; opening its window");
+                    if !args.background {
+                        sys::open_window(&ui_url);
+                    }
+                    return Ok(());
+                }
+                anyhow::bail!("can't listen on {addr}: {e}");
+            }
+        }
+    }
+
+    let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).build()?;
     let paused = cfg.escalation.mode == "off";
+    let model = supervisor::Supervisor::new(&cfg.local_model);
     let app: Shared = Arc::new(App {
-        cfg,
-        http,
-        nodes: registry,
+        cfg: Arc::new(RwLock::new(cfg.clone())),
+        cfg_path: cfg_path.clone(),
+        http: http.clone(),
+        nodes: nodes::Registry::new(),
+        model,
+        traffic: Traffic::new(),
+        gpu: Mutex::new(None),
+        models: Mutex::new(Vec::new()),
         sessions: Mutex::new(HashMap::new()),
         forced: Mutex::new(Vec::new()),
         activity: Mutex::new(VecDeque::new()),
         handoffs_paused: AtomicBool::new(paused),
+        started: Instant::now(),
     });
+    tracing::info!(target: "router", "PoolParty Router {} starting (settings: {})",
+        env!("CARGO_PKG_VERSION"), cfg_path.display());
+
+    app.nodes.spawn_poller(http, app.cfg.clone());
+    spawn_ticker(app.clone());
+    {
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || rescan(&app));
+    }
+    if cfg.local_model.autostart && !cfg.local_model.model.is_empty() && cfg.nodes.local.url.is_empty() {
+        if let Err(e) = app.model.start(&cfg.local_model).await {
+            tracing::warn!(target: "router", "couldn't start this PC's model: {e}");
+        }
+    }
 
     let router = Router::new()
-        .route("/", get(dashboard))
+        .route("/", get(ui))
         .route("/health", get(|| async { "ok" }))
-        .route("/router/handoffs", get(list_handoffs))
-        .route("/router/mode", post(set_mode))
         .route("/status", get(status))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(proxy))
         .route("/v1/completions", post(proxy))
         .route("/infill", post(proxy))
+        .route("/router/events", get(sse))
+        .route("/router/setup", get(setup_info))
+        .route("/router/settings", post(save_settings))
+        .route("/router/discover", post(discover))
+        .route("/router/model/start", post(model_start))
+        .route("/router/model/stop", post(model_stop))
+        .route("/router/test", post(test_node))
+        .route("/router/open", post(open_thing))
+        .route("/router/autostart", post(autostart))
+        .route("/router/quit", post(quit))
         .route("/router/escalate", post(escalate))
         .route("/router/reset", post(reset))
+        .route("/router/mode", post(set_mode))
+        .route("/router/handoffs", get(list_handoffs))
         .layer(DefaultBodyLimit::max(256 * 1024 * 1024))
-        .with_state(app);
+        .with_state(app.clone());
 
     let mut servers = Vec::new();
-    for addr in listen {
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| anyhow::anyhow!("can't listen on {addr}: {e}"))?;
-        tracing::info!("PoolParty router listening on http://{addr}/v1  (model \"auto\"), dashboard at http://{addr}/");
-        let r = router.clone();
+    for (addr, listener) in listeners {
+        tracing::info!(target: "router", "listening on http://{addr}/v1 (model \"auto\")");
+        let r = router.clone().into_make_service_with_connect_info::<SocketAddr>();
         servers.push(tokio::spawn(async move { axum::serve(listener, r).await }));
     }
-    for s in servers {
-        s.await??;
+    if !args.background {
+        sys::open_window(&ui_url);
+        tokio::task::spawn_blocking(sys::ensure_start_menu_shortcut);
     }
+
+    let app2 = app.clone();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        r = futures_util::future::select_all(servers) => { r.0??; }
+    }
+    app2.model.stop().await;
     Ok(())
 }
 
-fn authorized(app: &App, headers: &HeaderMap) -> bool {
-    let Some(key) = &app.cfg.router.api_key else { return true };
+// ------------------------------------------------------------ background work
+
+fn rescan(app: &App) {
+    let g = sys::gpu();
+    let gb = g.as_ref().map(|g| g.memory_total_gb);
+    *app.gpu.lock().unwrap() = g;
+    let extra = app.cfg.read().unwrap().local_model.model_dirs.clone();
+    let found = sys::find_models(&extra, gb);
+    let ls = supervisor::resolve_llama_server(&app.cfg.read().unwrap().local_model.llama_server);
+    tracing::info!(target: "router", "found {} model file(s); llama-server: {}", found.len(),
+        ls.map(|p| p.display().to_string()).unwrap_or_else(|| "not found".into()));
+    *app.models.lock().unwrap() = found;
+}
+
+/// Once a second: traffic rates, machine states and GPU load to the UI.
+fn spawn_ticker(app: Shared) {
+    tokio::spawn(async move {
+        let mut n: u64 = 0;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            n += 1;
+            if n % 2 == 0 {
+                let a = app.clone();
+                if let Ok(g) = tokio::task::spawn_blocking(sys::gpu).await {
+                    *a.gpu.lock().unwrap() = g;
+                }
+            }
+            app.traffic.sample();
+            events().send("tick", live_state(&app));
+        }
+    });
+}
+
+fn live_state(app: &App) -> Value {
+    let t = app.traffic.last();
+    let sessions = app.sessions.lock().unwrap();
+    let stuck = sessions.values().filter(|s| s.strikes > 0).count();
+    json!({
+        "nodes": app.nodes.snapshot(),
+        "model": app.model.status(),
+        "traffic": {"local": t[telemetry::LOCAL], "remote": t[telemetry::REMOTE], "claude": t[telemetry::CLAUDE]},
+        "gpu": *app.gpu.lock().unwrap(),
+        "paused": app.handoffs_paused.load(Ordering::Relaxed),
+        "sessions": sessions.len(),
+        "sessions_with_strikes": stuck,
+        "uptime_secs": app.started.elapsed().as_secs(),
+    })
+}
+
+// ------------------------------------------------------------ access control
+
+fn authorized(app: &App, headers: &HeaderMap, query_key: Option<&str>) -> bool {
+    let cfg = app.cfg.read().unwrap();
+    let Some(key) = &cfg.router.api_key else { return true };
     let got = headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .or_else(|| headers.get("x-api-key").and_then(|h| h.to_str().ok()));
+        .or_else(|| headers.get("x-api-key").and_then(|h| h.to_str().ok()))
+        .or(query_key);
     got == Some(key.as_str())
+}
+
+/// The buttons that start programs or open folders only work from this PC
+/// itself, unless an API key is set.
+fn control_ok(app: &App, headers: &HeaderMap, peer: SocketAddr) -> Result<(), Response> {
+    if !authorized(app, headers, None) {
+        return Err(error(StatusCode::UNAUTHORIZED, "missing or wrong router api key"));
+    }
+    let has_key = app.cfg.read().unwrap().router.api_key.is_some();
+    if !peer.ip().is_loopback() && !has_key {
+        return Err(error(StatusCode::FORBIDDEN, "controls only work on this PC (set an api_key to allow others)"));
+    }
+    Ok(())
 }
 
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -127,57 +289,354 @@ fn error(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({"error": {"message": msg, "type": "poolparty_router"}}))).into_response()
 }
 
-async fn models(State(app): State<Shared>, headers: HeaderMap) -> Response {
-    if !authorized(&app, &headers) {
+fn ok(v: Value) -> Response {
+    Json(v).into_response()
+}
+
+// ------------------------------------------------------------ UI endpoints
+
+async fn ui() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("app.html"))
+}
+
+#[derive(serde::Deserialize)]
+struct KeyQuery {
+    key: Option<String>,
+}
+
+/// Live events for the app: recent log lines first, then everything new.
+async fn sse(State(app): State<Shared>, headers: HeaderMap, Query(q): Query<KeyQuery>) -> Response {
+    if !authorized(&app, &headers, q.key.as_deref()) {
         return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
     }
-    let data: Vec<Value> = ["auto", "mac", "jayspc"]
-        .iter()
-        .map(|id| json!({"id": id, "object": "model", "owned_by": "poolparty"}))
+    let rx = events().tx.subscribe();
+    let mut first: Vec<String> = events()
+        .recent_log(300)
+        .into_iter()
+        .map(|l| json!({"type": "log", "data": l}).to_string())
         .collect();
-    Json(json!({"object": "list", "data": data})).into_response()
+    first.push(json!({"type": "tick", "data": live_state(&app)}).to_string());
+    let backlog = futures_util::stream::iter(first.into_iter().map(|m| Ok::<_, Infallible>(Event::default().data(m))));
+    let live = futures_util::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(m) => return Some((Ok(Event::default().data(m.to_string())), rx)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(backlog.chain(live)).keep_alive(KeepAlive::default()).into_response()
 }
 
 async fn status(State(app): State<Shared>, headers: HeaderMap) -> Response {
-    if !authorized(&app, &headers) {
+    if !authorized(&app, &headers, None) {
         return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
     }
+    let cfg = app.cfg();
     let mut sessions: Vec<_> =
         app.sessions.lock().unwrap().values().map(|s| (s.last_seen, s.summary())).collect();
     sessions.sort_by(|a, b| b.0.cmp(&a.0));
     let sessions: Vec<_> = sessions.into_iter().take(20).map(|(_, s)| s).collect();
     let activity: Vec<_> = app.activity.lock().unwrap().iter().rev().cloned().collect();
-    Json(json!({
-        "nodes": app.nodes.snapshot(),
-        "version": env!("CARGO_PKG_VERSION"),
-        "handoffs": handoff_files(&app, 10),
-        "escalation": {
-            "paused": app.handoffs_paused.load(Ordering::Relaxed),
-            "mode": app.cfg.escalation.mode,
-            "strikes_to_escalate": app.cfg.escalation.strikes_to_escalate,
-            "handoff_dir": app.cfg.handoff_dir(),
-        },
-        "sessions": sessions,
-        "activity": activity,
+    let mut live = live_state(&app);
+    live["version"] = json!(env!("CARGO_PKG_VERSION"));
+    live["handoffs"] = json!(handoff_files(&cfg, 10));
+    live["escalation"] = json!({
+        "paused": app.handoffs_paused.load(Ordering::Relaxed),
+        "mode": cfg.escalation.mode,
+        "strikes_to_escalate": cfg.escalation.strikes_to_escalate,
+        "handoff_dir": cfg.handoff_dir(),
+    });
+    live["session_list"] = json!(sessions);
+    live["activity"] = json!(activity);
+    live["endpoint"] = json!(format!("http://{}/v1", cfg.router.listen.first().cloned().unwrap_or_default()));
+    ok(live)
+}
+
+async fn setup_info(State(app): State<Shared>, headers: HeaderMap) -> Response {
+    if !authorized(&app, &headers, None) {
+        return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
+    }
+    let cfg = app.cfg();
+    ok(json!({
+        "settings_file": app.cfg_path.display().to_string(),
+        "remote": {"name": cfg.nodes.remote.name, "url": cfg.nodes.remote.url,
+                   "has_api_key": cfg.nodes.remote.api_key.is_some()},
+        "local": {"name": cfg.nodes.local.name, "external_url": cfg.nodes.local.url},
+        "local_model": cfg.local_model,
+        "escalation": {"strikes_to_escalate": cfg.escalation.strikes_to_escalate},
+        "models": *app.models.lock().unwrap(),
+        "llama_servers": sys::find_llama_servers().iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "llama_server_in_use": supervisor::resolve_llama_server(&cfg.local_model.llama_server).map(|p| p.display().to_string()),
+        "gpu": *app.gpu.lock().unwrap(),
+        "autostart": sys::autostart_enabled(),
+        "handoff_dir": cfg.handoff_dir(),
+        "log_file": cfg.router.log_file,
     }))
-    .into_response()
+}
+
+async fn discover(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    let a = app.clone();
+    let _ = tokio::task::spawn_blocking(move || rescan(&a)).await;
+    setup_info(State(app), headers).await
+}
+
+/// Partial update: only the fields sent are changed.
+async fn save_settings(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, body: Bytes) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    let Ok(v) = serde_json::from_slice::<Value>(&body) else {
+        return error(StatusCode::BAD_REQUEST, "settings must be JSON");
+    };
+    let (before, after) = {
+        let mut cfg = app.cfg.write().unwrap();
+        let before = cfg.local_model.clone();
+        let r = &v["remote"];
+        if let Some(u) = r["url"].as_str() {
+            cfg.nodes.remote.url = config::normalize_url(u, Some(8080));
+        }
+        if let Some(n) = r["name"].as_str().filter(|n| !n.trim().is_empty()) {
+            cfg.nodes.remote.name = n.trim().to_string();
+        }
+        if let Some(k) = r["api_key"].as_str() {
+            cfg.nodes.remote.api_key = (!k.trim().is_empty()).then(|| k.trim().to_string());
+        }
+        if let Some(n) = v["local"]["name"].as_str().filter(|n| !n.trim().is_empty()) {
+            cfg.nodes.local.name = n.trim().to_string();
+        }
+        let m = &v["local_model"];
+        if let Some(x) = m["model"].as_str() {
+            cfg.local_model.model = x.trim().to_string();
+        }
+        if let Some(x) = m["llama_server"].as_str() {
+            cfg.local_model.llama_server = x.trim().to_string();
+        }
+        if let Some(x) = m["context"].as_u64() {
+            cfg.local_model.context = x.clamp(2048, 1_048_576) as u32;
+        }
+        if let Some(x) = m["autostart"].as_bool() {
+            cfg.local_model.autostart = x;
+        }
+        if let Some(x) = v["escalation"]["strikes_to_escalate"].as_u64() {
+            cfg.escalation.strikes_to_escalate = x.clamp(1, 20) as u32;
+        }
+        (before, cfg.local_model.clone())
+    };
+    let cfg = app.cfg();
+    if let Err(e) = cfg.save(&app.cfg_path) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't save settings: {e}"));
+    }
+    tracing::info!(target: "router", "settings saved");
+
+    let model_changed = before.model != after.model
+        || before.llama_server != after.llama_server
+        || before.context != after.context;
+    if after.model.is_empty() {
+        app.model.stop().await;
+        app.model.mark_not_set_up();
+    } else if model_changed && app.model.is_active() {
+        if let Err(e) = app.model.start(&after).await {
+            return error(StatusCode::BAD_REQUEST, e);
+        }
+    } else if model_changed {
+        app.model.stop().await; // leaves it "stopped" with the new model chosen
+    }
+    app.nodes.refresh(&app.http, &cfg).await;
+    ok(json!({"saved": true}))
+}
+
+async fn model_start(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    match app.model.start(&app.cfg().local_model).await {
+        Ok(()) => ok(json!({"model": app.model.status()})),
+        Err(e) => error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn model_stop(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    app.model.stop().await;
+    let cfg = app.cfg();
+    app.nodes.refresh(&app.http, &cfg).await;
+    ok(json!({"model": app.model.status()}))
+}
+
+/// "Test" button: reach the machine, then time a tiny generation.
+/// Body: {"node": "local"|"remote", "url"?: "...", "api_key"?: "..."} — url
+/// lets the app test an address before saving it.
+async fn test_node(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, body: Bytes) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let cfg = app.cfg();
+    let remote = v["node"].as_str() == Some("remote");
+    let mut node = if remote {
+        cfg.nodes.remote.clone()
+    } else {
+        NodeCfg { url: cfg.local_url(), ..cfg.nodes.local.clone() }
+    };
+    if let Some(u) = v["url"].as_str().filter(|u| !u.trim().is_empty()) {
+        node.url = config::normalize_url(u, Some(8080));
+    }
+    if let Some(k) = v["api_key"].as_str().filter(|k| !k.trim().is_empty()) {
+        node.api_key = Some(k.trim().to_string());
+    }
+    if node.url.is_empty() {
+        return ok(json!({"ok": false, "message": "Enter the machine's address first."}));
+    }
+    let auth = |r: reqwest::RequestBuilder| match &node.api_key {
+        Some(k) => r.bearer_auth(k),
+        None => r,
+    };
+    let t0 = Instant::now();
+    let reach = auth(app.http.get(format!("{}/models", node.url)).timeout(Duration::from_secs(5))).send().await;
+    let latency = t0.elapsed().as_millis() as u64;
+    let model = match reach {
+        Ok(r) if r.status().is_success() => {
+            let j: Value = r.json().await.unwrap_or(Value::Null);
+            j["data"][0]["id"].as_str().map(nodes::friendly_model_name)
+        }
+        Ok(r) if r.status().as_u16() == 401 => {
+            return ok(json!({"ok": false, "message": "Reached it, but the API key is wrong or missing.", "latency_ms": latency}))
+        }
+        Ok(r) if r.status().as_u16() == 503 => {
+            return ok(json!({"ok": false, "message": "Reached it; the model is still loading. Try again in a minute.", "latency_ms": latency}))
+        }
+        Ok(r) => return ok(json!({"ok": false, "message": format!("It answered with error {}.", r.status().as_u16())})),
+        Err(e) => {
+            return ok(json!({"ok": false, "message": format!("Couldn't reach {}: {}", node.url, nodes::short_err(&e))}))
+        }
+    };
+    let gen_body = json!({
+        "model": model.clone().unwrap_or_else(|| "auto".into()),
+        "messages": [{"role": "user", "content": "Reply with just the word OK."}],
+        "max_tokens": 24, "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": false},
+    });
+    let t1 = Instant::now();
+    let answer = auth(app.http.post(format!("{}/chat/completions", node.url)).json(&gen_body).timeout(Duration::from_secs(120)))
+        .send()
+        .await;
+    let secs = t1.elapsed().as_secs_f64();
+    let (tps, reply) = match answer {
+        Ok(r) if r.status().is_success() => {
+            let j: Value = r.json().await.unwrap_or(Value::Null);
+            let tps = j["timings"]["predicted_per_second"].as_f64().or_else(|| {
+                j["usage"]["completion_tokens"].as_f64().map(|t| t / secs.max(0.001))
+            });
+            let reply = j["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+            (tps, reply)
+        }
+        _ => (None, String::new()),
+    };
+    let who = model.clone().unwrap_or_else(|| "The model".into());
+    let answered = tps.is_some() || !reply.is_empty();
+    let msg = match tps {
+        Some(t) => format!("Connected in {latency} ms. {who} answered at {t:.0} tokens/sec."),
+        None if answered => format!("Connected in {latency} ms. {who} answered in {secs:.1}s."),
+        None => format!("Connected in {latency} ms, but the test answer failed."),
+    };
+    tracing::info!(target: "router", "test {}: {msg}", node.name);
+    ok(json!({"ok": answered, "message": msg, "latency_ms": latency, "tokens_per_sec": tps,
+              "model": model, "reply": reply, "url": node.url}))
+}
+
+/// Body: {"what": "handoffs"|"logs"|"settings"|"handoff", "path"?: "..."}
+async fn open_thing(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, body: Bytes) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let cfg = app.cfg();
+    let path = match v["what"].as_str() {
+        Some("handoffs") => {
+            let d = cfg.handoff_dir();
+            std::fs::create_dir_all(&d).ok();
+            d
+        }
+        Some("logs") => cfg.router.log_file.clone().unwrap_or_else(|| app.cfg_path.clone()),
+        Some("settings") => app.cfg_path.clone(),
+        Some("handoff") => {
+            // Only files inside the handoff folder.
+            let Some(p) = v["path"].as_str().map(PathBuf::from) else {
+                return error(StatusCode::BAD_REQUEST, "path missing");
+            };
+            if !p.starts_with(cfg.handoff_dir()) {
+                return error(StatusCode::FORBIDDEN, "not a handoff file");
+            }
+            p
+        }
+        _ => return error(StatusCode::BAD_REQUEST, "what must be handoffs, logs, settings or handoff"),
+    };
+    sys::reveal(&path);
+    ok(json!({"opened": path}))
+}
+
+async fn autostart(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>, body: Bytes) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    let on = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["enabled"].as_bool()).unwrap_or(true);
+    match sys::set_autostart(on) {
+        Ok(()) => {
+            tracing::info!(target: "router", "start with Windows: {}", if on { "on" } else { "off" });
+            ok(json!({"autostart": on}))
+        }
+        Err(e) => error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn quit(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if let Err(r) = control_ok(&app, &headers, peer) {
+        return r;
+    }
+    tracing::info!(target: "router", "quitting");
+    app.model.stop().await;
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::process::exit(0);
+    });
+    ok(json!({"quitting": true}))
+}
+
+// ------------------------------------------------------------ model API
+
+async fn models(State(app): State<Shared>, headers: HeaderMap) -> Response {
+    if !authorized(&app, &headers, None) {
+        return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
+    }
+    let data: Vec<Value> = ["auto", "local", "remote"]
+        .iter()
+        .map(|id| json!({"id": id, "object": "model", "owned_by": "poolparty"}))
+        .collect();
+    ok(json!({"object": "list", "data": data}))
 }
 
 /// Body: {"session": "<id>"}; without one, the most recently active session.
 async fn escalate(State(app): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
-    if !authorized(&app, &headers) {
+    if !authorized(&app, &headers, None) {
         return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
     }
     let Some(id) = pick_session(&app, &body) else {
-        return error(StatusCode::NOT_FOUND, "no active session to escalate");
+        return error(StatusCode::NOT_FOUND, "no active session to hand off");
     };
     app.forced.lock().unwrap().push(id.clone());
-    Json(json!({"session": id, "note": "the next request in this session hands off to Claude Code"}))
-        .into_response()
+    tracing::info!(target: "handoff", "session {id} will hand off on its next request");
+    ok(json!({"session": id, "note": "the next request in this session hands off to Claude Code"}))
 }
 
 async fn reset(State(app): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
-    if !authorized(&app, &headers) {
+    if !authorized(&app, &headers, None) {
         return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
     }
     let Some(id) = pick_session(&app, &body) else {
@@ -186,7 +645,7 @@ async fn reset(State(app): State<Shared>, headers: HeaderMap, body: Bytes) -> Re
     if let Some(s) = app.sessions.lock().unwrap().get_mut(&id) {
         s.reset();
     }
-    Json(json!({"session": id, "strikes": 0})).into_response()
+    ok(json!({"session": id, "strikes": 0}))
 }
 
 fn pick_session(app: &App, body: &[u8]) -> Option<String> {
@@ -200,18 +659,26 @@ fn pick_session(app: &App, body: &[u8]) -> Option<String> {
     }
 }
 
-fn node_cfg(app: &App, t: Target) -> &NodeCfg {
+fn node_cfg(cfg: &Config, t: Target) -> NodeCfg {
     match t {
-        Target::Mac => &app.cfg.nodes.mac,
-        Target::Jayspc => &app.cfg.nodes.jayspc,
+        Target::Local => NodeCfg { url: cfg.local_url(), ..cfg.nodes.local.clone() },
+        Target::Remote => cfg.nodes.remote.clone(),
+    }
+}
+
+fn link(t: Target) -> usize {
+    match t {
+        Target::Local => telemetry::LOCAL,
+        Target::Remote => telemetry::REMOTE,
     }
 }
 
 async fn proxy(State(app): State<Shared>, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
     let started = Instant::now();
-    if !authorized(&app, &headers) {
+    if !authorized(&app, &headers, None) {
         return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
     }
+    let cfg = app.cfg();
     let path = uri.path().to_string();
     let mut req: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -220,15 +687,17 @@ async fn proxy(State(app): State<Shared>, uri: Uri, headers: HeaderMap, body: By
     let shape = classify::classify(&path, &req);
     let stream = req["stream"].as_bool().unwrap_or(false);
     let asked = req["model"].as_str().unwrap_or("auto").to_string();
-    let pinned = match asked.as_str() {
-        "mac" => Some(Target::Mac),
-        "jayspc" => Some(Target::Jayspc),
-        m if Some(m) == app.cfg.nodes.mac.model.as_deref() => Some(Target::Mac),
-        m if Some(m) == app.cfg.nodes.jayspc.model.as_deref() => Some(Target::Jayspc),
-        _ => None,
-    };
+    let pinned = Target::from_model_name(&asked).or_else(|| {
+        if Some(asked.as_str()) == cfg.nodes.remote.model.as_deref() {
+            Some(Target::Remote)
+        } else if Some(asked.as_str()) == cfg.nodes.local.model.as_deref() {
+            Some(Target::Local)
+        } else {
+            None
+        }
+    });
 
-    // Session tracking and escalation only apply to chat-style requests.
+    // Session tracking and handoffs only apply to chat-style requests.
     let messages: Vec<Value> = req["messages"].as_array().cloned().unwrap_or_default();
     let session_id = (!messages.is_empty()).then(|| {
         escalation::session_key(headers.get("x-session-id").and_then(|h| h.to_str().ok()), &messages)
@@ -249,21 +718,28 @@ async fn proxy(State(app): State<Shared>, uri: Uri, headers: HeaderMap, body: By
                 let day = Duration::from_secs(24 * 3600);
                 sessions.retain(|_, s| s.last_seen.is_some_and(|t| t.elapsed() < day));
             }
-            let s = sessions
-                .entry(id.clone())
-                .or_insert_with(|| Session::new(id.clone()));
+            let s = sessions.entry(id.clone()).or_insert_with(|| Session::new(id.clone()));
+            let before = s.strikes;
             s.observe(&messages);
-            if forced {
-                s.reasons.push("escalated by hand".into());
+            if s.strikes > before {
+                tracing::info!(target: "handoff", "session \"{}\": strike {} of {} ({})",
+                    escalation::truncate(&s.task, 50), s.strikes, cfg.escalation.strikes_to_escalate,
+                    s.reasons.last().cloned().unwrap_or_default());
             }
-            forced || s.strikes >= app.cfg.escalation.strikes_to_escalate
+            if forced {
+                s.reasons.push("handed off by hand".into());
+            }
+            forced || s.strikes >= cfg.escalation.strikes_to_escalate
         };
         if handoff_on && stuck {
-            return do_handoff(&app, id, &messages, stream, &asked, &shape, started).await;
+            return do_handoff(&app, &cfg, id, &messages, stream, &asked, &shape, started).await;
         }
     }
 
-    let mut decision = decide(&shape, pinned, app.nodes.view(Target::Mac), app.nodes.view(Target::Jayspc));
+    let remote_set_up = cfg.remote_configured();
+    let view = |a: &App| (a.nodes.view(Target::Remote), a.nodes.view(Target::Local));
+    let (r, l) = view(&app);
+    let mut decision = decide(&shape, pinned, r, l, remote_set_up);
     let mut retried = false;
     loop {
         let (target, rule) = match decision {
@@ -274,18 +750,16 @@ async fn proxy(State(app): State<Shared>, uri: Uri, headers: HeaderMap, body: By
                     if let Some(s) = app.sessions.lock().unwrap().get_mut(id) {
                         s.reasons.push(reason.clone());
                     }
-                    return do_handoff(&app, id, &messages, stream, &asked, &shape, started).await;
+                    return do_handoff(&app, &cfg, id, &messages, stream, &asked, &shape, started).await;
                 }
                 record(&app, &session_id, Some(&shape), "none", &reason, 503, started);
                 return error(StatusCode::SERVICE_UNAVAILABLE, format!("PoolParty: {reason}"));
             }
         };
 
-        let node = node_cfg(&app, target);
+        let node = node_cfg(&cfg, target);
         if pinned.is_some() || asked == "auto" {
-            let model = node.model.clone().or_else(|| {
-                app.nodes.snapshot().into_iter().find(|n| n.name == target.name()).and_then(|n| n.model)
-            });
+            let model = node.model.clone().or_else(|| app.nodes.get(target).model);
             if let Some(m) = model {
                 req["model"] = json!(m);
             }
@@ -296,6 +770,7 @@ async fn proxy(State(app): State<Shared>, uri: Uri, headers: HeaderMap, body: By
             format!("{}{}", node.url, path.strip_prefix("/v1").unwrap_or(&path))
         };
 
+        let guard = app.traffic.start(link(target));
         let mut r = app.http.post(&upstream).json(&req);
         if let Some(k) = &node.api_key {
             r = r.bearer_auth(k);
@@ -304,6 +779,11 @@ async fn proxy(State(app): State<Shared>, uri: Uri, headers: HeaderMap, body: By
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 record(&app, &session_id, Some(&shape), target.name(), rule, status, started);
+                let streamed = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|c| c.to_str().ok())
+                    .is_some_and(|c| c.contains("event-stream"));
                 let mut out = Response::builder()
                     .status(status)
                     .header("x-poolparty-node", HeaderValue::from_static(target.name()))
@@ -311,30 +791,40 @@ async fn proxy(State(app): State<Shared>, uri: Uri, headers: HeaderMap, body: By
                 if let Some(ct) = resp.headers().get("content-type") {
                     out = out.header("content-type", ct.clone());
                 }
+                let traffic = app.traffic.clone();
+                let l = link(target);
+                let body = resp.bytes_stream().map(move |chunk| {
+                    let _keep = &guard; // in flight until the stream ends
+                    if let Ok(b) = &chunk {
+                        traffic.chunk(l, b, streamed);
+                    }
+                    chunk
+                });
                 return out
-                    .body(Body::from_stream(resp.bytes_stream()))
+                    .body(Body::from_stream(body))
                     .unwrap_or_else(|e| error(StatusCode::BAD_GATEWAY, format!("building response: {e}")));
             }
             Err(e) => {
+                drop(guard);
                 let msg = nodes::short_err(&e);
-                tracing::warn!(node = target.name(), %msg, "upstream failed");
+                tracing::warn!(target: "router", "{} didn't answer: {msg}", node.name);
                 app.nodes.mark_down(target, msg.clone());
                 if retried || pinned.is_some() {
                     record(&app, &session_id, Some(&shape), target.name(), &msg, 502, started);
-                    return error(
-                        StatusCode::BAD_GATEWAY,
-                        format!("PoolParty: {} unreachable: {msg}", target.name()),
-                    );
+                    return error(StatusCode::BAD_GATEWAY, format!("PoolParty: {} unreachable: {msg}", node.name));
                 }
                 retried = true;
-                decision = decide(&shape, None, app.nodes.view(Target::Mac), app.nodes.view(Target::Jayspc));
+                let (r, l) = view(&app);
+                decision = decide(&shape, None, r, l, remote_set_up);
             }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_handoff(
     app: &App,
+    cfg: &Config,
     id: &str,
     messages: &[Value],
     stream: bool,
@@ -342,18 +832,23 @@ async fn do_handoff(
     shape: &classify::Shape,
     started: Instant,
 ) -> Response {
-    let summary = if app.cfg.escalation.summarize_with_local_model && app.nodes.view(Target::Mac).online {
-        let mac = &app.cfg.nodes.mac;
-        handoff::summarize(&app.http, &mac.url, mac.api_key.as_deref(), mac.model.as_deref(), messages).await
-    } else {
-        None
+    // The strongest machine that's up writes the "what was tried" summary.
+    let writer = [Target::Remote, Target::Local].into_iter().find(|t| app.nodes.view(*t).online);
+    let summary = match (cfg.escalation.summarize_with_local_model, writer) {
+        (true, Some(t)) => {
+            tracing::info!(target: "handoff", "asking {} to summarize what was tried", node_cfg(cfg, t).name);
+            let n = node_cfg(cfg, t);
+            let m = n.model.clone().or_else(|| app.nodes.get(t).model);
+            handoff::summarize(&app.http, &n.url, n.api_key.as_deref(), m.as_deref(), messages).await
+        }
+        _ => None,
     };
     let written = {
         let mut sessions = app.sessions.lock().unwrap();
         let Some(s) = sessions.get_mut(id) else {
             return error(StatusCode::INTERNAL_SERVER_ERROR, "session vanished");
         };
-        let res = handoff::write(&app.cfg.handoff_dir(), s, messages, summary);
+        let res = handoff::write(&cfg.handoff_dir(), s, messages, summary);
         if let Ok(h) = &res {
             s.escalations += 1;
             s.last_handoff = Some(h.path.display().to_string());
@@ -364,14 +859,13 @@ async fn do_handoff(
     let h = match written {
         Ok(h) => h,
         Err(e) => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("PoolParty: couldn't write handoff file: {e}"),
-            )
+            return error(StatusCode::INTERNAL_SERVER_ERROR, format!("PoolParty: couldn't write handoff file: {e}"))
         }
     };
-    tracing::info!(session = id, file = %h.path.display(), "handed off to Claude Code");
-    record(app, &Some(id.to_string()), Some(shape), "claude-code", "handoff", 200, started);
+    tracing::info!(target: "handoff", "handed off to Claude Code: {}", h.path.display());
+    app.traffic.pulse(telemetry::CLAUDE);
+    events().send("handoff", json!({"session": id, "path": h.path, "reasons": h.reasons}));
+    record(app, &Some(id.to_string()), Some(shape), "claude", "handoff", 200, started);
 
     let text = handoff::stop_message(&h);
     if stream {
@@ -404,7 +898,13 @@ fn record(
         status,
         ms: started.elapsed().as_millis(),
     };
-    tracing::info!(route = %a.route, rule = %a.rule, status, ms = a.ms, "request");
+    let kind = a.kind.map(|k| format!("{k:?}").to_lowercase()).unwrap_or_default();
+    if status < 400 {
+        tracing::info!(target: "request", "{kind} (~{} tokens) -> {}  [{}]", a.est_tokens, a.route, a.rule);
+    } else {
+        tracing::warn!(target: "request", "{kind} failed ({status}): {}", a.rule);
+    }
+    events().send("request", &a);
     let mut q = app.activity.lock().unwrap();
     q.push_back(a);
     while q.len() > 50 {
@@ -426,12 +926,13 @@ fn init_logging(file: Option<&std::path::Path>) -> anyhow::Result<()> {
         }
         None => None,
     };
-    tracing_subscriber::registry().with(filter).with(console).with(file_layer).init();
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(console)
+        .with(file_layer)
+        .with(telemetry::UiLayer)
+        .init();
     Ok(())
-}
-
-async fn dashboard() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("dashboard.html"))
 }
 
 #[derive(serde::Serialize)]
@@ -442,8 +943,8 @@ struct HandoffFile {
     command: String,
 }
 
-fn handoff_files(app: &App, limit: usize) -> Vec<HandoffFile> {
-    let dir = app.cfg.handoff_dir();
+fn handoff_files(cfg: &Config, limit: usize) -> Vec<HandoffFile> {
+    let dir = cfg.handoff_dir();
     let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
     let mut files: Vec<_> = rd
         .filter_map(Result::ok)
@@ -468,21 +969,21 @@ fn handoff_files(app: &App, limit: usize) -> Vec<HandoffFile> {
 }
 
 async fn list_handoffs(State(app): State<Shared>, headers: HeaderMap) -> Response {
-    if !authorized(&app, &headers) {
+    if !authorized(&app, &headers, None) {
         return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
     }
-    Json(json!({"handoffs": handoff_files(&app, 100)})).into_response()
+    ok(json!({"handoffs": handoff_files(&app.cfg(), 100)}))
 }
 
 /// Body: {"paused": true|false}
 async fn set_mode(State(app): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
-    if !authorized(&app, &headers) {
+    if !authorized(&app, &headers, None) {
         return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
     }
     let Some(paused) = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["paused"].as_bool()) else {
         return error(StatusCode::BAD_REQUEST, "send {\"paused\": true} or {\"paused\": false}");
     };
     app.handoffs_paused.store(paused, Ordering::Relaxed);
-    tracing::info!(paused, "handoffs switched");
-    Json(json!({"paused": paused})).into_response()
+    tracing::info!(target: "handoff", "handoffs {}", if paused { "paused" } else { "resumed" });
+    ok(json!({"paused": paused}))
 }

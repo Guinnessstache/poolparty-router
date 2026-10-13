@@ -1,134 +1,132 @@
 # PoolParty Router
 
-One OpenAI-compatible endpoint that sends each AI request to the right machine:
+**One address for all your local AI.** PoolParty Router sits between your coding
+tools and the machines that run your models. Each request goes to the right
+machine on its own, and when a local model gets stuck it hands the job to Claude
+Code.
 
-| Node | What runs there | Gets |
+![PoolParty Router showing live traffic between a PC, its GPU, a Mac Studio and Claude Code](docs/img/app.png)
+
+🌊 [Website](https://guinnessstache.github.io/poolparty-router/) · ⬇️ [Download for Windows](https://github.com/Guinnessstache/poolparty-router/releases/latest/download/PoolParty-Router-windows-x64.zip)
+
+## What it does
+
+| Machine | Typically | Gets |
 | --- | --- | --- |
-| **Mac Studio M1 Ultra** | Qwen3.8-Flash-Next or Qwen3.8-27B in llama-server | Agent turns, chat, images |
-| **jayspc RTX 4070 Ti** | A small coder model in llama-server | Tab completion, short chats when the Mac is busy or offline |
-| **Claude** | Claude Code on your Claude plan | Sessions where the local model is stuck (handoff) |
+| **This PC** | A gaming GPU (e.g. RTX 4070 Ti) running a small model | Tab completion, quick chats |
+| **Remote machine** | A big-memory box (e.g. Mac Studio) running a large model | Coding agents, long chats, images |
+| **Claude Code** | Your Claude Pro or Max plan | Sessions where the local model is stuck |
 
-Point OpenCode, Pi, Kilo Code, Continue or Unsloth Studio at
-`http://<router>:4000/v1` with model `auto`. Model `mac` or `jayspc` pins a
-request to one node.
+- **Status lights and plain-English status** for every machine.
+- **One-click model control:** the app finds your GPU, `llama-server` and the
+  models already on your PC, shows which ones fit, and starts or stops the model for you.
+- **Live traffic map** of your PC, GPU, remote machine and Claude Code, with
+  tokens per second on each connection.
+- **"What's happening" log** with filters for requests, model output, handoffs
+  and problems.
+- **Claude handoffs:** when a coding agent keeps hitting the same build error, the
+  router writes a short brief and tells you the one command to continue in Claude Code.
+- Starts with Windows if you want it to, and adds itself to the Start menu.
 
-## Quick test (before the Mac arrives)
+## Get started (Windows)
 
-Double-click **SETUP-AND-TEST.cmd**. It:
+1. [Download the zip](https://github.com/Guinnessstache/poolparty-router/releases/latest/download/PoolParty-Router-windows-x64.zip),
+   unzip it anywhere, and open **PoolParty Router**. Windows may warn that the
+   app is unsigned: choose **More info → Run anyway**.
+2. Pick a model for this PC and press **Use this model**. The app looks in LM
+   Studio's, Hugging Face's and your Downloads folders. If it can't find
+   `llama-server`, it tells you where to get it.
+3. Optional: under **Mac Studio**, press **Set up**, type the machine's name or IP
+   address, press **Test**, then **Save**.
+4. Copy the address from **Connect your coding tools** into OpenCode, Pi, Continue,
+   Kilo Code or Unsloth Studio and choose the model **auto**. The app shows a
+   ready-to-paste config for each.
 
-1. finds `llama-server` (PATH, Unsloth's build, or `C:\llama`) and a model that
-   fits the 4070 Ti (Qwen3.8-27B IQ2_S if present, otherwise any 2–10 GB GGUF),
-2. builds the router if the source changed,
-3. starts both hidden, with the Mac slot pointed at the 4070 Ti,
-4. runs 12 checks (routing, streaming, a stuck session handing off, the pause
-   switch, the hand-off button, and what happens with the Mac offline),
-5. saves `test\report.txt`, opens the dashboard, and writes
-   `test\opencode-demo\opencode.json` so OpenCode is already pointed at the router.
+### Setting up a Mac Studio as the remote machine
 
-**STOP.cmd** shuts it all down. Use `-Model <gguf>` or `-LlamaServer <exe>` to
-override what it picks, or `-NoTests` to just start everything. Close LM Studio
-and Ollama first so the model has the GPU to itself.
-
-## Setup
-
-**1. Mac Studio** (once): `brew install llama.cpp`, copy the `mac` folder over, then
+On the Mac: `brew install llama.cpp`, copy the `mac` folder from the zip over, and run
 
 ```bash
-./mac/setup-mac.sh ~/models/<flash-next>.gguf
+./mac/setup-mac.sh ~/models/<your-model>.gguf
 ```
 
-It raises the GPU memory limit to 112 GB at every boot, runs llama-server at
-login with an API key, and prints the `[nodes.mac]` lines for router.toml.
-`WIRED_MB`, `CTX` and `PORT` can be set in front of the command to change the
-defaults. `mac/uninstall-mac.sh` undoes it.
+It raises macOS's GPU memory limit (to 112 GB on a 128 GB Mac) at every boot,
+starts `llama-server` at login with a password, and prints the address and
+password to type into the app. `mac/uninstall-mac.sh` undoes it.
 
-**2. jayspc model:** set `MODEL` in `scripts\jayspc-model.cmd` to a small coder
-GGUF (3–7B, Q4) and run it. It serves on 127.0.0.1:8081.
+## How requests are routed
 
-**3. Router:** double-click `start-router.cmd`. The first run builds the router
-and writes `router.toml`; paste in the Mac lines and run it again. Then open
-**http://127.0.0.1:4000/** for the dashboard, which also has copy-paste settings
-for OpenCode, Pi, Unsloth Studio, Kilo Code and Continue.
+1. Model `local` or `remote` → that machine.
+2. No remote machine set up yet → this PC takes everything.
+3. Tab completion (`/v1/completions`, `/infill`, or `max_tokens` ≤ 64) → this PC.
+4. Coding agents (requests with tools), chat and images → the remote machine.
+5. Remote machine offline → chat falls back to this PC; agent turns get a clear
+   error instead of a much weaker model.
+6. Prompt bigger than any loaded model can hold → handoff to Claude Code.
 
-**4. Start at logon (optional):**
+Every reply carries `x-poolparty-node` and `x-poolparty-rule` headers saying where
+it went and why.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install-startup.ps1 -WithModel
-```
+## When a session gets handed off
 
-Runs the router (and, with `-WithModel`, the 4070 Ti model) hidden at logon,
-restarting them if they crash. Set `log_file` in router.toml so you can still
-read the logs. `scripts\uninstall-startup.ps1` removes both tasks.
-
-## Dashboard
-
-`http://127.0.0.1:4000/` shows the three nodes, each coding session with its
-strikes and why, the handoff briefs with a button that copies the Claude Code
-command, and the last 50 requests with where each one went. You can hand a session
-off, clear its strikes, or pause handoffs from there.
-
-## Routing rules
-
-Evaluated top to bottom; the `x-poolparty-node` and `x-poolparty-rule` response
-headers say which rule fired.
-
-1. Model `mac` or `jayspc` → that node.
-2. Completion (`/v1/completions`, `/infill`, or `max_tokens` ≤ 64) → 4070 Ti, else Mac.
-3. Agent turn (request has `tools`), chat, or images → Mac.
-4. Mac offline → plain chat goes to the 4070 Ti. Agent turns never do: they get a
-   503 instead of a much weaker answer.
-5. Prompt bigger than every loaded model's context → handoff to Claude Code.
-
-The router polls each node's `/v1/models` and llama-server's `/props` every few
-seconds, so it knows what's online and each model's context size. A node that
-fails mid-request is marked down and the request is retried once elsewhere.
-
-## Escalation to Claude (handoff mode)
-
-The Claude Pro plan has no API credits, so the router doesn't call Claude itself.
-When a coding-agent session is stuck, it:
-
-1. Writes a short brief to `handoffs\handoff_<time>_<session>.md`: the task,
-   why it was handed off, what was tried (summarized by the Mac's model), and
-   the last failing output. The full local transcript is left out on purpose.
-2. Replies to the agent with a message telling you to run
-   `claude "Read <brief> and take over the task it describes."` in the project.
-
-A session counts as stuck at **3 strikes**:
+A coding session gets a strike when:
 
 | Signal | Strikes |
 | --- | --- |
-| The same build/test error comes back (line numbers and paths ignored) | 1 per repeat |
-| A tool call with arguments that aren't valid JSON | 1 |
-| The exact same tool call 3 times in a row | 2 |
-| `POST /router/escalate` (by hand) | escalates at once |
+| The same build or test error comes back (line numbers and paths ignored) | 1 per repeat |
+| A tool call whose arguments aren't valid JSON | 1 |
+| The exact same tool call three times in a row | 2 |
 
-Only output from command-style tools (bash, shell, run, test, build…) is judged
-for errors. File reads are ignored, since source code is full of the word "error".
-Output that shows success ("Build succeeded", "0 failed", "test result: ok") clears
-the strikes. After a handoff the session starts fresh, so you can keep working
-locally once Claude has fixed the problem.
+At three strikes (adjustable), the router writes a brief to the handoff folder
+(the task, why it was handed off, what was tried, summarized by a local model,
+and the last failing output) and replies to the agent with the command to run:
 
-## Endpoints
+```
+claude "Read C:\...\handoff_2026-10-13_175731_knight.md and take over the task it describes."
+```
+
+Claude Code runs on your Claude plan, so a Pro plan is enough. Only output from
+command-style tools (bash, shell, test, build…) counts, so reading source files
+full of the word "error" doesn't trigger anything. Output that shows success
+clears the strikes.
+
+## Checking it works
+
+`SETUP-AND-TEST.cmd` runs 12 automatic checks against your own hardware: routing,
+streaming, a stuck session handing off, the pause switch, the hand-off button,
+and what happens with the remote machine offline. It writes `test\report.txt`.
+`STOP.cmd` shuts it down.
+
+## Settings
+
+The app saves its settings in `%APPDATA%\PoolParty Router\router.toml`; you never
+need to edit it, but [router.example.toml](router.example.toml) documents every
+option. Handoff briefs and the log file live in the same folder.
+
+**Security:** the router listens on `127.0.0.1` only. To use it from other
+machines, add your Tailscale IP to `listen` and set `api_key`. The buttons that
+start programs or open folders only work from the PC itself unless `api_key` is set.
+
+## API
 
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /v1/chat/completions`, `/v1/completions`, `/infill` | Routed requests (streaming passes straight through) |
-| `GET /v1/models` | Lists `auto`, `mac`, `jayspc` |
-| `GET /status` | Nodes, active sessions with their strikes, last 50 routed requests |
-| `POST /router/escalate` | Hand off the most recent session (or `{"session":"<id>"}`) |
-| `POST /router/reset` | Clear a session's strikes |
-| `POST /router/mode` | `{"paused": true}` stops handoffs until you send `false` |
-| `GET /router/handoffs` | Handoff briefs, newest first, with the Claude command for each |
-| `GET /` | Dashboard |
-| `GET /health` | Liveness |
+| `GET /v1/models` | `auto`, `local`, `remote` |
+| `GET /status` | Machines, model state, traffic, sessions, recent requests |
+| `GET /router/events` | Live Server-Sent Events: log lines, traffic ticks, requests, handoffs |
+| `POST /router/escalate` | Hand off a session (`{"session": "<id>"}`, or the latest) |
+| `POST /router/mode` | `{"paused": true}` pauses handoffs |
 
-Sessions are identified by an `x-session-id` header when the tool sends one,
-otherwise by a hash of the first user message.
+## Building from source
 
-## Security
+Requires Rust. `cargo build --release` produces `target/release/poolparty-router`.
+Run it with `--background` to skip opening the window, or pass a settings file path.
+Release builds on Windows are windowed apps with no console. GitHub Actions builds
+the Windows zip for every tagged release.
 
-- Listens on `127.0.0.1` by default. To reach it from the Mac or another machine,
-  add your Tailscale IP to `listen`, not `0.0.0.0`.
-- Set `router.api_key` and clients must send it as a Bearer token.
-- Node API keys are sent only to their node.
+## Credits
+
+Models run in [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`.
+PoolParty Router is a companion to [PoolParty](https://github.com/Guinnessstache/poolparty).
+MIT licensed.
