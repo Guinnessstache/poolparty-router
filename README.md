@@ -12,24 +12,43 @@ Point OpenCode, Pi, Kilo Code, Continue or Unsloth Studio at
 `http://<router>:4000/v1` with model `auto`. Model `mac` or `jayspc` pins a
 request to one node.
 
-## Build and run (Windows)
+## Setup
+
+**1. Mac Studio** (once): `brew install llama.cpp`, copy the `mac` folder over, then
+
+```bash
+./mac/setup-mac.sh ~/models/<flash-next>.gguf
+```
+
+It raises the GPU memory limit to 112 GB at every boot, runs llama-server at
+login with an API key, and prints the `[nodes.mac]` lines for router.toml.
+`WIRED_MB`, `CTX` and `PORT` can be set in front of the command to change the
+defaults. `mac/uninstall-mac.sh` undoes it.
+
+**2. jayspc model:** set `MODEL` in `scripts\jayspc-model.cmd` to a small coder
+GGUF (3–7B, Q4) and run it. It serves on 127.0.0.1:8081.
+
+**3. Router:** double-click `start-router.cmd`. The first run builds the router
+and writes `router.toml`; paste in the Mac lines and run it again. Then open
+**http://127.0.0.1:4000/** for the dashboard, which also has copy-paste settings
+for OpenCode, Pi, Unsloth Studio, Kilo Code and Continue.
+
+**4. Start at logon (optional):**
 
 ```powershell
-cargo build --release
-.\target\release\poolparty-router.exe router.toml
+powershell -ExecutionPolicy Bypass -File scripts\install-startup.ps1 -WithModel
 ```
 
-The first run writes a starter `router.toml` if none exists. Set the two node URLs
-and run it again. `start-router.cmd` does both steps.
+Runs the router (and, with `-WithModel`, the 4070 Ti model) hidden at logon,
+restarting them if they crash. Set `log_file` in router.toml so you can still
+read the logs. `scripts\uninstall-startup.ps1` removes both tasks.
 
-On the nodes, run llama-server as usual:
+## Dashboard
 
-```
-# Mac
-llama-server -m <flash-next.gguf> -ngl 99 -c 65536 --jinja --host 0.0.0.0 --port 8080 --api-key <key>
-# jayspc
-llama-server -m <small-coder.gguf> -ngl 99 -c 8192 --host 127.0.0.1 --port 8081
-```
+`http://127.0.0.1:4000/` shows the three nodes, each coding session with its
+strikes and why, the handoff briefs with a button that copies the Claude Code
+command, and the last 50 requests with where each one went. You can hand a session
+off, clear its strikes, or pause handoffs from there.
 
 ## Routing rules
 
@@ -82,6 +101,9 @@ locally once Claude has fixed the problem.
 | `GET /status` | Nodes, active sessions with their strikes, last 50 routed requests |
 | `POST /router/escalate` | Hand off the most recent session (or `{"session":"<id>"}`) |
 | `POST /router/reset` | Clear a session's strikes |
+| `POST /router/mode` | `{"paused": true}` stops handoffs until you send `false` |
+| `GET /router/handoffs` | Handoff briefs, newest first, with the Claude command for each |
+| `GET /` | Dashboard |
 | `GET /health` | Liveness |
 
 Sessions are identified by an `x-session-id` header when the tool sends one,

@@ -29,11 +29,15 @@ pub struct RouterCfg {
     /// How often to poll each node's health, in seconds.
     #[serde(default = "default_poll")]
     pub poll_seconds: u64,
+    /// Append logs to this file as well as the console (useful when the router
+    /// runs hidden at logon).
+    #[serde(default)]
+    pub log_file: Option<PathBuf>,
 }
 
 impl Default for RouterCfg {
     fn default() -> Self {
-        Self { listen: default_listen(), api_key: None, poll_seconds: default_poll() }
+        Self { listen: default_listen(), api_key: None, poll_seconds: default_poll(), log_file: None }
     }
 }
 
@@ -107,9 +111,17 @@ impl Config {
             .with_context(|| format!("reading config {}", path.display()))?;
         let mut cfg: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        // Absolute, so the Claude command printed in a handoff works from any folder.
+        let base = std::path::absolute(path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")))
+            .context("resolving config folder")?;
+        let base = base.as_path();
         if cfg.escalation.handoff_dir.is_none() {
-            let base = path.parent().unwrap_or(Path::new("."));
             cfg.escalation.handoff_dir = Some(base.join("handoffs"));
+        }
+        if let Some(f) = &cfg.router.log_file {
+            if f.is_relative() {
+                cfg.router.log_file = Some(base.join(f));
+            }
         }
         for n in [&mut cfg.nodes.mac, &mut cfg.nodes.jayspc] {
             n.url = n.url.trim_end_matches('/').to_string();

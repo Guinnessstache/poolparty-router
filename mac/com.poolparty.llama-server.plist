@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.poolparty.llama-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__LLAMA__</string>
+    <string>-m</string><string>__MODEL__</string>
+    <string>-ngl</string><string>99</string>
+    <string>-c</string><string>__CTX__</string>
+    <string>--jinja</string>
+    <string>--host</string><string>0.0.0.0</string>
+    <string>--port</string><string>__PORT__</string>
+    <string>--api-key</string><string>__KEY__</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- Don't spin if the model fails to load; wait a minute between tries. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/poolparty-llama-server.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/poolparty-llama-server.log</string>
+</dict>
+</plist>

@@ -21,6 +21,7 @@ use escalation::Session;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,8 @@ struct App {
     /// Session ids with a manual escalation pending.
     forced: Mutex<Vec<String>>,
     activity: Mutex<VecDeque<Activity>>,
+    /// Runtime switch from the dashboard; starts from escalation.mode.
+    handoffs_paused: AtomicBool,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -50,12 +53,6 @@ type Shared = Arc<App>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
     let path = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("router.toml"));
     if !path.exists() {
         std::fs::write(&path, include_str!("../router.example.toml"))?;
@@ -63,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let cfg = Config::load(&path)?;
+    init_logging(cfg.router.log_file.as_deref())?;
 
     let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).build()?;
     let registry = nodes::Registry::new(&cfg.nodes.mac, &cfg.nodes.jayspc);
@@ -73,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let listen = cfg.router.listen.clone();
+    let paused = cfg.escalation.mode == "off";
     let app: Shared = Arc::new(App {
         cfg,
         http,
@@ -80,10 +79,14 @@ async fn main() -> anyhow::Result<()> {
         sessions: Mutex::new(HashMap::new()),
         forced: Mutex::new(Vec::new()),
         activity: Mutex::new(VecDeque::new()),
+        handoffs_paused: AtomicBool::new(paused),
     });
 
     let router = Router::new()
+        .route("/", get(dashboard))
         .route("/health", get(|| async { "ok" }))
+        .route("/router/handoffs", get(list_handoffs))
+        .route("/router/mode", post(set_mode))
         .route("/status", get(status))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(proxy))
@@ -99,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .map_err(|e| anyhow::anyhow!("can't listen on {addr}: {e}"))?;
-        tracing::info!("PoolParty router listening on http://{addr}/v1  (model \"auto\")");
+        tracing::info!("PoolParty router listening on http://{addr}/v1  (model \"auto\"), dashboard at http://{addr}/");
         let r = router.clone();
         servers.push(tokio::spawn(async move { axum::serve(listener, r).await }));
     }
@@ -146,7 +149,10 @@ async fn status(State(app): State<Shared>, headers: HeaderMap) -> Response {
     let activity: Vec<_> = app.activity.lock().unwrap().iter().rev().cloned().collect();
     Json(json!({
         "nodes": app.nodes.snapshot(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "handoffs": handoff_files(&app, 10),
         "escalation": {
+            "paused": app.handoffs_paused.load(Ordering::Relaxed),
             "mode": app.cfg.escalation.mode,
             "strikes_to_escalate": app.cfg.escalation.strikes_to_escalate,
             "handoff_dir": app.cfg.handoff_dir(),
@@ -227,7 +233,7 @@ async fn proxy(State(app): State<Shared>, uri: Uri, headers: HeaderMap, body: By
     let session_id = (!messages.is_empty()).then(|| {
         escalation::session_key(headers.get("x-session-id").and_then(|h| h.to_str().ok()), &messages)
     });
-    let handoff_on = app.cfg.escalation.mode == "handoff";
+    let handoff_on = !app.handoffs_paused.load(Ordering::Relaxed);
 
     if let Some(id) = &session_id {
         let forced = {
@@ -238,6 +244,11 @@ async fn proxy(State(app): State<Shared>, uri: Uri, headers: HeaderMap, body: By
         };
         let stuck = {
             let mut sessions = app.sessions.lock().unwrap();
+            // Forget sessions idle for a day so the map doesn't grow forever.
+            if sessions.len() > 200 {
+                let day = Duration::from_secs(24 * 3600);
+                sessions.retain(|_, s| s.last_seen.is_some_and(|t| t.elapsed() < day));
+            }
             let s = sessions
                 .entry(id.clone())
                 .or_insert_with(|| Session::new(id.clone()));
@@ -399,4 +410,79 @@ fn record(
     while q.len() > 50 {
         q.pop_front();
     }
+}
+
+fn init_logging(file: Option<&std::path::Path>) -> anyhow::Result<()> {
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let console = fmt::layer();
+    let file_layer = match file {
+        Some(p) => {
+            if let Some(dir) = p.parent() {
+                std::fs::create_dir_all(dir).ok();
+            }
+            let f = std::fs::OpenOptions::new().create(true).append(true).open(p)?;
+            Some(fmt::layer().with_ansi(false).with_writer(Mutex::new(f)))
+        }
+        None => None,
+    };
+    tracing_subscriber::registry().with(filter).with(console).with(file_layer).init();
+    Ok(())
+}
+
+async fn dashboard() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("dashboard.html"))
+}
+
+#[derive(serde::Serialize)]
+struct HandoffFile {
+    name: String,
+    path: String,
+    modified: String,
+    command: String,
+}
+
+fn handoff_files(app: &App, limit: usize) -> Vec<HandoffFile> {
+    let dir = app.cfg.handoff_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut files: Vec<_> = rd
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files
+        .into_iter()
+        .take(limit)
+        .map(|(t, p)| {
+            let modified: chrono::DateTime<chrono::Local> = t.into();
+            let path = p.display().to_string();
+            HandoffFile {
+                name: p.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                command: format!("claude \"Read {path} and take over the task it describes.\""),
+                modified: modified.format("%b %-d, %H:%M").to_string(),
+                path,
+            }
+        })
+        .collect()
+}
+
+async fn list_handoffs(State(app): State<Shared>, headers: HeaderMap) -> Response {
+    if !authorized(&app, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
+    }
+    Json(json!({"handoffs": handoff_files(&app, 100)})).into_response()
+}
+
+/// Body: {"paused": true|false}
+async fn set_mode(State(app): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
+    if !authorized(&app, &headers) {
+        return error(StatusCode::UNAUTHORIZED, "missing or wrong router api key");
+    }
+    let Some(paused) = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["paused"].as_bool()) else {
+        return error(StatusCode::BAD_REQUEST, "send {\"paused\": true} or {\"paused\": false}");
+    };
+    app.handoffs_paused.store(paused, Ordering::Relaxed);
+    tracing::info!(paused, "handoffs switched");
+    Json(json!({"paused": paused})).into_response()
 }

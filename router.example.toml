@@ -9,6 +9,7 @@
 listen = ["127.0.0.1:4000"]
 # api_key = "pick-a-long-random-string"   # clients then send it as a Bearer token
 poll_seconds = 5
+# log_file = "router.log"   # also write logs here (relative to this file)
 
 [nodes.mac]
 url = "http://mac-studio:8080/v1"
