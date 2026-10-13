@@ -463,7 +463,7 @@ pub async fn probe_stdio(entry: &serde_json::Value) -> Option<String> {
         let _ = si.flush().await;
     }
     let mut out = tokio::io::BufReader::new(child.stdout.take()?).lines();
-    let answered = tokio::time::timeout(Duration::from_secs(20), async {
+    let answered = tokio::time::timeout(Duration::from_secs(90), async {
         while let Ok(Some(l)) = out.next_line().await {
             if l.contains("\"jsonrpc\"") {
                 return true;
@@ -488,7 +488,7 @@ pub async fn probe_stdio(entry: &serde_json::Value) -> Option<String> {
     let tail = lines[lines.len().saturating_sub(4)..].join(" ");
     Some(match (timed_out, tail.is_empty()) {
         (_, false) => format!("{} said: {tail}", prog.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()),
-        (true, true) => "it started but didn't answer within 20 seconds.".into(),
+        (true, true) => "it started but didn't answer within 90 seconds.".into(),
         (false, true) => "it closed right away without saying why.".into(),
     })
 }
