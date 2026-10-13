@@ -1164,47 +1164,123 @@ async fn app_connect(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(
     }
 }
 
+/// First http(s) URL found anywhere in an entry (url field or args like
+/// `npx mcp-remote http://127.0.0.1:8000/mcp`).
+fn entry_url(v: &Value) -> Option<String> {
+    if let Some(u) = v["url"].as_str().or(v["serverUrl"].as_str()) {
+        return Some(u.to_string());
+    }
+    v["args"].as_array()?.iter().filter_map(|a| a.as_str()).find(|a| a.starts_with("http://") || a.starts_with("https://")).map(String::from)
+}
+
+/// Ways to run a desktop entry from Claude Code, best first.
+fn variants(v: &Value) -> Vec<Value> {
+    let mut v = v.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.remove("_extension");
+    }
+    let mut out = Vec::new();
+    if let Some(url) = entry_url(&v) {
+        out.push(json!({"type": "http", "url": url}));
+    }
+    if v["command"].is_string() {
+        let mut stdio = v.clone();
+        stdio["type"] = json!("stdio");
+        // `uv run pkg` only works inside one project folder; `uvx pkg` works anywhere.
+        let args: Vec<Value> = v["args"].as_array().cloned().unwrap_or_default();
+        if v["command"] == "uv" && args.first().and_then(|a| a.as_str()) == Some("run") && args.len() > 1 {
+            let mut uvx = stdio.clone();
+            uvx["command"] = json!("uvx");
+            uvx["args"] = json!(args[1..].to_vec());
+            out.push(uvx);
+        }
+        out.push(stdio);
+    }
+    out
+}
+
+async fn entry_answers(app: &App, v: &Value) -> Result<(), String> {
+    if v["type"] == "http" {
+        let url = v["url"].as_str().unwrap_or_default();
+        return if claude::probe_http_mcp(&app.http, url).await { Ok(()) } else { Err(format!("nothing answered at {url}")) };
+    }
+    match claude::probe_stdio(v).await {
+        None => Ok(()),
+        Some(why) => Err(why),
+    }
+}
+
 async fn connect_app(app: &App, cl: &std::path::Path, which: apps::App, cfg: &Config) -> Result<String, String> {
     let id = which.id();
-    // 1. The Claude desktop app may already have it set up: copy that over.
-    let from_desktop = claude::desktop_servers().into_iter().find(|(name, v)| {
-        name.to_lowercase().contains(id) || v.to_string().to_lowercase().contains(id)
-    });
-    if let Some((name, mut v)) = from_desktop {
-        if v.get("url").is_some() && v.get("type").is_none() {
-            v["type"] = json!("http");
-        }
-        claude::add_server(cl, id, &v).await?;
-        let shown = name.split(" (").next().unwrap_or(&name).to_string();
-        if let Some(why) = claude::probe_stdio(&v).await {
-            return Err(format!("Copied the \"{shown}\" connection into Claude Code, but its program won't start outside the Claude desktop app: {why}"));
-        }
-        return Ok(format!("Copied the \"{shown}\" connection from the Claude desktop app into Claude Code."));
-    }
-    // 2. Otherwise set it up from what we know about each app.
-    match which {
-        apps::App::Unreal => {
-            let base = cfg.apps.unreal_url.trim_end_matches('/').trim_end_matches("/mcp").to_string();
-            let mut url = cfg.apps.unreal_url.clone();
-            for cand in [cfg.apps.unreal_url.clone(), format!("{base}/mcp"), format!("{base}/"), base.clone()] {
-                if claude::probe_http_mcp(&app.http, &cand).await {
-                    url = cand;
-                    break;
+    // 1. Connections the Claude desktop app already has for this app, desktop
+    //    extensions first (those are what it actually uses), then its config file.
+    let mut found: Vec<(String, Value)> = claude::desktop_servers()
+        .into_iter()
+        .filter(|(name, v)| name.to_lowercase().contains(id) || v.to_string().to_lowercase().contains(id))
+        .collect();
+    found.sort_by_key(|(_, v)| v["_extension"] != json!(true));
+    let mut tried: Vec<String> = Vec::new();
+    let mut fallback: Option<(String, Value)> = None;
+    for (name, v) in &found {
+        let shown = name.split(" (").next().unwrap_or(name).to_string();
+        for cand in variants(v) {
+            match entry_answers(app, &cand).await {
+                Ok(()) => {
+                    claude::add_server(cl, id, &cand).await?;
+                    return Ok(format!("Connected Claude Code to {} using the \"{shown}\" connection from the Claude desktop app.", which.name()));
+                }
+                Err(why) => {
+                    tried.push(format!("\"{shown}\" ({}): {why}", describe_entry(&cand)));
+                    fallback.get_or_insert((shown.clone(), cand));
                 }
             }
-            claude::add_server(cl, "unreal", &json!({"type": "http", "url": url})).await?;
-            Ok(format!("Added Unreal ({url}) to Claude Code. It shows as connected while the editor is open with its MCP server running."))
         }
-        apps::App::Unity => {
-            if !apps::unity_cli_installed() {
-                return Err("Unity connects through the Unity command-line tool, which isn't installed. In PowerShell run:  $env:UNITY_CLI_CHANNEL='beta'; irm https://public-cdn.cloud.unity3d.com/hub/prod/cli/install.ps1 | iex   then press Connect again.".into());
-            }
-            claude::add_server(cl, "unity", &json!({"type": "stdio", "command": "unity", "args": ["mcp"]})).await?;
-            Ok("Added Unity to Claude Code (through the Unity command-line tool). Open a project with the Pipeline package to connect.".into())
-        }
-        apps::App::Blender => Err(format!("Couldn't find Blender in the Claude desktop app's settings (looked in {} place{}). Blender connects through its MCP add-on plus a small bridge program.",
-            claude::desktop_dirs().len().max(1), if claude::desktop_dirs().len() == 1 { "" } else { "s" }) + " Add Blender in the Claude desktop app (Settings > Connectors) or follow blender.org/lab/mcp-server, then press Connect again and it will be copied into Claude Code."),
     }
+    // 2. Unreal: its own HTTP server, whether or not it's running right now.
+    if which == apps::App::Unreal {
+        let base = cfg.apps.unreal_url.trim_end_matches('/').trim_end_matches("/mcp").to_string();
+        let mut url = cfg.apps.unreal_url.clone();
+        let mut up = false;
+        for cand in [cfg.apps.unreal_url.clone(), format!("{base}/mcp"), format!("{base}/"), base.clone()] {
+            if claude::probe_http_mcp(&app.http, &cand).await {
+                url = cand;
+                up = true;
+                break;
+            }
+        }
+        claude::add_server(cl, "unreal", &json!({"type": "http", "url": url})).await?;
+        return if up {
+            Ok(format!("Connected Claude Code to Unreal at {url}."))
+        } else {
+            Ok(format!("Added Unreal ({url}) to Claude Code. Its light turns green once Unreal's MCP server is running: in Unreal's console run ModelContextProtocol.StartServer."))
+        };
+    }
+    if which == apps::App::Unity {
+        if !apps::unity_cli_installed() {
+            return Err("Unity connects through the Unity command-line tool, which isn't installed. In PowerShell run:  $env:UNITY_CLI_CHANNEL='beta'; irm https://public-cdn.cloud.unity3d.com/hub/prod/cli/install.ps1 | iex   then press Connect again.".into());
+        }
+        claude::add_server(cl, "unity", &json!({"type": "stdio", "command": "unity", "args": ["mcp"]})).await?;
+        return Ok("Added Unity to Claude Code (through the Unity command-line tool). Open a project with the Pipeline package to connect.".into());
+    }
+    // Blender: keep the best guess so Claude Code retries it later, and say what failed.
+    if let Some((shown, cand)) = fallback {
+        claude::add_server(cl, id, &cand).await?;
+        return Err(format!("None of the Blender connections answered from Claude Code. Tried {}. Make sure Blender is open with its MCP server started, then press Connect again. Kept \"{shown}\" for now.", tried.join("; ")));
+    }
+    Err(format!("Couldn't find Blender in the Claude desktop app's settings (looked in {} place(s)). Add Blender in the Claude desktop app (Settings > Connectors) or follow blender.org/lab/mcp-server, then press Connect again and it will be copied into Claude Code.", claude::desktop_dirs().len()))
+}
+
+fn describe_entry(v: &Value) -> String {
+    if v["type"] == "http" {
+        return v["url"].as_str().unwrap_or("").to_string();
+    }
+    let args: Vec<&str> = v["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str()).collect();
+    let mut s = format!("{} {}", v["command"].as_str().unwrap_or(""), args.join(" "));
+    if s.len() > 80 {
+        s.truncate(77);
+        s.push_str("...");
+    }
+    s.trim().to_string()
 }
 
 /// Body: {"project": "<folder with a .uproject>"}

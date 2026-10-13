@@ -346,6 +346,8 @@ fn desktop_extensions(dir: &Path) -> Vec<(String, serde_json::Value)> {
         }
         if let Some(entry) = extension_entry(&m, &ext_dir, &settings["userConfig"]) {
             let name = m["name"].as_str().or(m["display_name"].as_str()).unwrap_or(&id).to_string();
+            let mut entry = entry;
+            entry["_extension"] = serde_json::json!(true); // internal marker, stripped before adding
             out.push((format!("{name} ({id})"), entry));
         }
     }
