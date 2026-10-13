@@ -12,6 +12,23 @@ Point OpenCode, Pi, Kilo Code, Continue or Unsloth Studio at
 `http://<router>:4000/v1` with model `auto`. Model `mac` or `jayspc` pins a
 request to one node.
 
+## Quick test (before the Mac arrives)
+
+Double-click **SETUP-AND-TEST.cmd**. It:
+
+1. finds `llama-server` (PATH, Unsloth's build, or `C:\llama`) and a model that
+   fits the 4070 Ti (Qwen3.8-27B IQ2_S if present, otherwise any 2–10 GB GGUF),
+2. builds the router if the source changed,
+3. starts both hidden, with the Mac slot pointed at the 4070 Ti,
+4. runs 12 checks (routing, streaming, a stuck session handing off, the pause
+   switch, the hand-off button, and what happens with the Mac offline),
+5. saves `test\report.txt`, opens the dashboard, and writes
+   `test\opencode-demo\opencode.json` so OpenCode is already pointed at the router.
+
+**STOP.cmd** shuts it all down. Use `-Model <gguf>` or `-LlamaServer <exe>` to
+override what it picks, or `-NoTests` to just start everything. Close LM Studio
+and Ollama first so the model has the GPU to itself.
+
 ## Setup
 
 **1. Mac Studio** (once): `brew install llama.cpp`, copy the `mac` folder over, then
