@@ -1,0 +1,29 @@
+# PoolParty router config — the three-node "triangle":
+#   mac     = Mac Studio M1 Ultra, big model (agents, chat, vision)
+#   jayspc  = RTX 4070 Ti, small coder model (tab completion, short chat)
+#   Claude  = reached by handing off to Claude Code when a session is stuck
+
+[router]
+# Point every tool at http://<this machine>:4000/v1 with model "auto".
+# Add your Tailscale IP here to reach the router from other machines.
+listen = ["127.0.0.1:4000"]
+# api_key = "pick-a-long-random-string"   # clients then send it as a Bearer token
+poll_seconds = 5
+
+[nodes.mac]
+url = "http://mac-studio:8080/v1"
+# api_key = "same value as llama-server --api-key on the Mac"
+# model = "qwen3.8-flash-next"
+
+[nodes.jayspc]
+url = "http://127.0.0.1:8081/v1"
+# model = "qwen-coder-small"
+
+[escalation]
+# "handoff": when a session is stuck, write a summary file and tell you to
+#            continue in Claude Code (covered by a Claude Pro or Max plan).
+# "off":     never escalate.
+mode = "handoff"
+strikes_to_escalate = 3
+# handoff_dir = "C:/Users/thist/Documents/PoolParty/handoffs"
+summarize_with_local_model = true
