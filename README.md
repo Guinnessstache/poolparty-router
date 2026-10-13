@@ -25,8 +25,9 @@ status light for each showing whether it's connected to Claude.
 - **Engine and 3D app lights:** Unreal, Unity and Blender each show whether they're
   open, whether their MCP server is running, and whether Claude Code is connected.
   **Connect** adds them to Claude Code (copying the setup from the Claude desktop
-  app when it has one), and **Set up a project** makes an Unreal project start its
-  MCP server on its own.
+  app when it has one). **Set up Unreal** finds the project open in Unreal, turns on
+  its MCP and Python plugins and makes the server start with the editor; after a
+  restart the app connects Unreal to Claude Code by itself.
 - **GPU hand-back:** while an engine is open, this PC's model pauses so the engine
   gets the whole GPU, and restarts when they close.
 - **Status lights and plain-English status** for every machine.

@@ -1072,6 +1072,8 @@ async fn refresh_claude(app: &App) {
 fn spawn_apps_watch(app: Shared) {
     tokio::spawn(async move {
         let mut was_running: Vec<&'static str> = Vec::new();
+        let mut last_unreal_try: Option<Instant> = None;
+        let mut auto_connected: Option<String> = None;
         loop {
             let cfg = app.cfg();
             let servers = app.claude.lock().unwrap().servers.clone();
@@ -1092,7 +1094,28 @@ fn spawn_apps_watch(app: Shared) {
                 }
             }
             was_running = running.clone();
+            let unreal_needs = status.iter().any(|a| a.id == "unreal" && a.running && a.claude.as_deref() != Some("connected"));
             *app.apps.lock().unwrap() = status;
+
+            // Unreal open but not connected: every 20 s, look for its MCP server and
+            // connect Claude Code to it as soon as it answers (e.g. after a restart).
+            if unreal_needs && last_unreal_try.map_or(true, |t: Instant| t.elapsed() > Duration::from_secs(20)) {
+                last_unreal_try = Some(Instant::now());
+                if let Some(url) = find_unreal_mcp(&app, &cfg).await {
+                    if auto_connected.as_deref() != Some(url.as_str()) {
+                        auto_connected = Some(url.clone());
+                        if let Some(cl) = claude::find(&cfg.claude.command) {
+                            tracing::info!(target: "apps", "Unreal's MCP server is up at {url}; connecting Claude Code to it");
+                            match connect_app(&app, &cl, apps::App::Unreal, &cfg).await {
+                                Ok(m) => tracing::info!(target: "apps", "{m}"),
+                                Err(e) => tracing::warn!(target: "apps", "Unreal: {e}"),
+                            }
+                            refresh_claude(&app).await;
+                            recheck_apps(&app).await;
+                        }
+                    }
+                }
+            }
 
             if cfg.local_model.pause_for_apps && cfg.nodes.local.url.is_empty() {
                 let paused = !app.paused_for.lock().unwrap().is_empty();
@@ -1162,6 +1185,23 @@ async fn app_connect(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(
             ok(json!({"ok": false, "message": e}))
         }
     }
+}
+
+/// Unreal's MCP endpoint if it's answering: the saved URL, else any port the editor listens on.
+async fn find_unreal_mcp(app: &App, cfg: &Config) -> Option<String> {
+    if claude::probe_http_mcp(&app.http, &cfg.apps.unreal_url).await {
+        return Some(cfg.apps.unreal_url.clone());
+    }
+    let ports = tokio::task::spawn_blocking(|| apps::listening_ports(apps::App::Unreal)).await.unwrap_or_default();
+    for p in ports {
+        for path in ["/mcp", "/"] {
+            let u = format!("http://127.0.0.1:{p}{path}");
+            if claude::probe_http_mcp(&app.http, &u).await {
+                return Some(u);
+            }
+        }
+    }
+    None
 }
 
 /// First http(s) URL found anywhere in an entry (url field or args like
@@ -1308,15 +1348,31 @@ async fn unreal_setup(State(app): State<Shared>, headers: HeaderMap, ConnectInfo
         return r;
     }
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let Some(dir) = v["project"].as_str().map(PathBuf::from) else {
-        return error(StatusCode::BAD_REQUEST, "project folder missing");
+    let dir = match v["project"].as_str().filter(|p| !p.trim().is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => {
+            // No folder given: use the project open in Unreal, else the only one in Documents\Unreal Projects.
+            let (open, known) = tokio::task::spawn_blocking(|| (apps::open_unreal_projects(), apps::known_unreal_projects()))
+                .await
+                .unwrap_or_default();
+            let pick = if open.len() == 1 { Some(open[0].clone()) } else if open.is_empty() && known.len() == 1 { Some(known[0].clone()) } else { None };
+            match pick {
+                Some(p) => p,
+                None => {
+                    let choices: Vec<String> = if open.is_empty() { known } else { open }.iter().take(8).map(|p| p.display().to_string()).collect();
+                    return ok(json!({"ok": false, "choices": choices,
+                        "message": if choices.is_empty() { "Couldn't find an Unreal project. Open your project in Unreal, or choose its folder." } else { "Which project?" }}));
+                }
+            }
+        }
     };
     match blueprint::setup_unreal_project(&dir) {
         Ok(done) => {
             for d in &done {
                 tracing::info!(target: "apps", "Unreal project {}: {d}", dir.display());
             }
-            ok(json!({"ok": true, "done": done}))
+            let running = app.apps.lock().unwrap().iter().any(|a| a.id == "unreal" && a.running);
+            ok(json!({"ok": true, "done": done, "project": dir.display().to_string(), "restart": running}))
         }
         Err(e) => ok(json!({"ok": false, "message": e})),
     }

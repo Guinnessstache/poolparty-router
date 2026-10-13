@@ -359,13 +359,25 @@ fn friendly_error(raw: &str) -> String {
 /// Make an Unreal project start its MCP server for Claude every time the
 /// editor opens: turn on the ModelContextProtocol, EditorToolset and Terminal
 /// plugins, and add Content/Python/init_unreal.py to start the server.
-pub fn setup_unreal_project(dir: &Path) -> Result<Vec<String>, String> {
-    let uproject = std::fs::read_dir(dir)
-        .map_err(|e| e.to_string())?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x == "uproject"))
-        .ok_or("That folder has no .uproject file.")?;
+/// The .uproject for a path: the file itself, one in the folder, or one in a
+/// folder directly inside it (in case the parent folder was picked).
+pub fn find_uproject(path: &Path) -> Option<PathBuf> {
+    if path.extension().is_some_and(|x| x == "uproject") && path.is_file() {
+        return Some(path.to_path_buf());
+    }
+    let here = |d: &Path| {
+        std::fs::read_dir(d).ok()?.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "uproject"))
+    };
+    if let Some(p) = here(path) {
+        return Some(p);
+    }
+    let mut found: Vec<PathBuf> = std::fs::read_dir(path).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_dir()).filter_map(|d| here(&d)).collect();
+    (found.len() == 1).then(|| found.remove(0))
+}
+
+pub fn setup_unreal_project(path: &Path) -> Result<Vec<String>, String> {
+    let uproject = find_uproject(path).ok_or("Couldn't find a .uproject file in that folder.")?;
+    let dir = uproject.parent().ok_or("bad project path")?.to_path_buf();
     let mut done = Vec::new();
     let text = std::fs::read_to_string(&uproject).map_err(|e| e.to_string())?;
     let mut v: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
@@ -377,7 +389,8 @@ pub fn setup_unreal_project(dir: &Path) -> Result<Vec<String>, String> {
         .or_insert_with(|| serde_json::json!([]));
     let list = plugins.as_array_mut().ok_or("unexpected Plugins list")?;
     let mut changed = false;
-    for name in ["ModelContextProtocol", "EditorToolset", "Terminal"] {
+    // PythonScriptPlugin runs Content/Python/init_unreal.py at startup.
+    for name in ["ModelContextProtocol", "EditorToolset", "Terminal", "PythonScriptPlugin"] {
         match list.iter_mut().find(|p| p["Name"] == name) {
             Some(p) if p["Enabled"] == true => {}
             Some(p) => {
@@ -396,7 +409,7 @@ pub fn setup_unreal_project(dir: &Path) -> Result<Vec<String>, String> {
             std::fs::copy(&uproject, &bak).map_err(|e| e.to_string())?;
         }
         std::fs::write(&uproject, serde_json::to_string_pretty(&v).unwrap()).map_err(|e| e.to_string())?;
-        done.push("Turned on the ModelContextProtocol, EditorToolset and Terminal plugins".into());
+        done.push(format!("Turned on Unreal's MCP, editor tools, terminal and Python plugins in {}", uproject.file_name().unwrap_or_default().to_string_lossy()));
     }
     let py_dir = dir.join("Content").join("Python");
     std::fs::create_dir_all(&py_dir).map_err(|e| e.to_string())?;
@@ -445,7 +458,7 @@ mod tests {
         let first = setup_unreal_project(&dir).unwrap();
         assert_eq!(first.len(), 2);
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("Knight.uproject")).unwrap()).unwrap();
-        assert_eq!(v["Plugins"].as_array().unwrap().len(), 3);
+        assert_eq!(v["Plugins"].as_array().unwrap().len(), 4);
         assert!(v["Plugins"].as_array().unwrap().iter().all(|p| p["Enabled"] == true));
         assert!(dir.join("Knight.uproject.bak").exists());
         let again = setup_unreal_project(&dir).unwrap();

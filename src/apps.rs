@@ -85,6 +85,59 @@ pub fn running_processes() -> Vec<String> {
         .collect()
 }
 
+/// .uproject files the running Unreal editors have open (from their command lines).
+pub fn open_unreal_projects() -> Vec<std::path::PathBuf> {
+    let text = if cfg!(windows) {
+        let script = "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'UnrealEditor*' -or $_.Name -like 'UE4Editor*' } | ForEach-Object { $_.CommandLine }";
+        sys::quiet(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]))
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    } else {
+        Command::new("ps").args(["-A", "-o", "args="]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if let Some(p) = uproject_in_command_line(line) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+fn uproject_in_command_line(line: &str) -> Option<std::path::PathBuf> {
+    let lower = line.to_lowercase();
+    let end = lower.find(".uproject")? + ".uproject".len();
+    let before = &line[..end];
+    let start = match before.rfind('"') {
+        Some(q) if before[..q].matches('"').count() % 2 == 0 => q + 1,
+        _ => before.rfind(' ').map_or(0, |i| i + 1),
+    };
+    let p = std::path::PathBuf::from(before[start..].trim_matches('"'));
+    p.is_file().then_some(p)
+}
+
+/// .uproject files under Documents\Unreal Projects (two levels deep), newest first.
+pub fn known_unreal_projects() -> Vec<std::path::PathBuf> {
+    let root = sys::home().join("Documents").join("Unreal Projects");
+    let mut found: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        if let Ok(rd) = std::fs::read_dir(e.path()) {
+            for f in rd.flatten() {
+                let p = f.path();
+                if p.extension().is_some_and(|x| x == "uproject") {
+                    let t = f.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                    found.push((t, p));
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
 /// TCP ports a running app is listening on (Windows; empty elsewhere).
 pub fn listening_ports(app: App) -> Vec<u16> {
     if !cfg!(windows) {
@@ -204,7 +257,7 @@ pub fn check(cfg: &AppsCfg, servers: &[McpServer], processes: &[String]) -> Vec<
 
 fn describe(app: App, running: bool, bridge: Option<bool>, claude: Option<&str>) -> (String, &'static str, Option<String>) {
     let start_hint = match app {
-        App::Unreal => "In Unreal, open the console (`) and run ModelContextProtocol.StartServer. Your Enable-ClaudeMCP.ps1 script makes a project do this on its own.",
+        App::Unreal => "Press Set up Unreal: it finds your open project, turns on Unreal's MCP plugins and makes the server start with the editor. Then restart Unreal.",
         App::Blender => "In Blender: Edit > Preferences > Add-ons > MCP, then Start server (you can turn on auto-start there).",
         App::Unity => "Add the Unity Pipeline package to the project once: unity pipeline install.",
     };
@@ -275,7 +328,19 @@ mod tests {
         assert_eq!((sum.as_str(), light), ("Open and connected to Claude Code", "good"));
         let (_, light, hint) = describe(App::Unreal, true, Some(false), Some("connected"));
         assert_eq!(light, "wait");
-        assert!(hint.unwrap().contains("StartServer"));
+        assert!(hint.unwrap().contains("Set up Unreal"));
+    }
+
+    #[test]
+    fn finds_uproject_in_command_lines() {
+        let dir = std::env::temp_dir().join(format!("pp ue {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let up = dir.join("Medieval Horde.uproject");
+        std::fs::write(&up, "{}").unwrap();
+        let line = format!("\"C:\\UE\\UnrealEditor.exe\" \"{}\" -skipcompile", up.display());
+        assert_eq!(uproject_in_command_line(&line), Some(up.clone()));
+        assert_eq!(uproject_in_command_line("UnrealEditor.exe -game"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

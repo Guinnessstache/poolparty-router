@@ -596,10 +596,12 @@ function renderApps(L) {
       <div><b>${esc(a.name)}</b> <span class="sum">${esc(a.summary)}</span></div>
       <div class="actions">
         ${canConnect ? `<button class="btn ${a.claude == null ? "main" : ""}" data-connect="${a.id}">${a.claude == null ? "Connect" : "Connect again"}</button>` : ""}
-        ${a.id === "unreal" ? `<button class="btn" data-uesetup>Set up a project</button>` : ""}
+        ${a.id === "unreal" && a.light !== "good" ? `<button class="btn ${a.running && a.bridge === false ? "main" : ""}" data-uesetup>Set up Unreal</button>` : ""}
       </div>
       ${a.hint && a.light !== "good" ? `<div class="hint">${hintHtml(a.hint)}</div>` : ""}
-      ${m ? `<div class="result ${m.ok ? "ok" : "err"}">${hintHtml(m.text)}</div>` : ""}</div>`;
+      ${m ? `<div class="result ${m.ok ? "ok" : "err"}">${hintHtml(m.text)}
+        ${m.choices ? `<div class="row" style="margin-top:6px">${m.choices.map(c => `<button class="btn" data-ueproj="${esc(c)}" title="${esc(c)}">${esc(c.split(/[\\/]/).pop())}</button>`).join("")}<button class="link" data-uebrowse>Choose another folder</button></div>` : ""}
+        ${m.browse ? `<div class="row" style="margin-top:6px"><button class="btn" data-uebrowse>Choose the project folder</button></div>` : ""}</div>` : ""}</div>`;
   }).join("");
   $("appList").querySelectorAll("[data-connect]").forEach(b => b.onclick = async () => {
     const id = b.dataset.connect; b.disabled = true; b.textContent = "Connecting…";
@@ -608,17 +610,27 @@ function renderApps(L) {
     S.appSig = null; if (S.live) renderApps(S.live);
   });
   const ue = $("appList").querySelector("[data-uesetup]");
-  if (ue) ue.onclick = async () => {
-    let dir = $("planProject").value.trim();
-    if (!dir) { try { dir = (await api("/router/pick-folder", {})).path; } catch {} }
-    if (!dir) { dir = prompt("Your Unreal project folder (the one with the .uproject file):") || ""; }
-    if (!dir) return;
-    try {
-      const r = await api("/router/apps/unreal-setup", { project: dir });
-      appMsg.unreal = r.ok ? { ok: true, text: r.done.join(". ") + ". Restart Unreal to load it." } : { ok: false, text: r.message };
-    } catch (e) { appMsg.unreal = { ok: false, text: e.message }; }
-    S.appSig = null; if (S.live) renderApps(S.live);
-  };
+  if (ue) ue.onclick = () => setupUnreal({});
+  $("appList").querySelectorAll("[data-ueproj]").forEach(b => b.onclick = () => setupUnreal({ project: b.dataset.ueproj }));
+  const ub = $("appList").querySelector("[data-uebrowse]");
+  if (ub) ub.onclick = async () => { let d = ""; try { d = (await api("/router/pick-folder", {})).path; } catch {} if (d) setupUnreal({ project: d }); };
+}
+async function setupUnreal(body) {
+  appMsg.unreal = { ok: true, text: "Setting up Unreal…" }; S.appSig = null; if (S.live) renderApps(S.live);
+  try {
+    const r = await api("/router/apps/unreal-setup", body);
+    if (r.ok) {
+      const name = (r.project || "").split(/[\\/]/).pop();
+      appMsg.unreal = { ok: true, text: `${name}: ${r.done.join(". ")}. ` + (r.restart
+        ? "Now save your work, close Unreal and open the project again. The app connects it to Claude Code by itself once it's back."
+        : "Open the project in Unreal. The app connects it to Claude Code by itself once it's running.") };
+    } else if (r.choices?.length) {
+      appMsg.unreal = { ok: true, text: r.message, choices: r.choices };
+    } else {
+      appMsg.unreal = { ok: false, text: r.message, browse: true };
+    }
+  } catch (e) { appMsg.unreal = { ok: false, text: e.message }; }
+  S.appSig = null; if (S.live) renderApps(S.live);
 }
 $("appsCheck").onclick = async () => {
   const b = $("appsCheck"); b.disabled = true; b.textContent = "Checking…";
