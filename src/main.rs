@@ -1175,7 +1175,8 @@ async fn connect_app(app: &App, cl: &std::path::Path, which: apps::App, cfg: &Co
             v["type"] = json!("http");
         }
         claude::add_server(cl, id, &v).await?;
-        return Ok(format!("Copied the \"{name}\" connection from the Claude desktop app into Claude Code."));
+        let shown = name.split(" (").next().unwrap_or(&name).to_string();
+        return Ok(format!("Copied the \"{shown}\" connection from the Claude desktop app into Claude Code."));
     }
     // 2. Otherwise set it up from what we know about each app.
     match which {

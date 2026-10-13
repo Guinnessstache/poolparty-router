@@ -200,20 +200,95 @@ pub async fn add_server(claude: &Path, name: &str, json: &serde_json::Value) -> 
     }
 }
 
-/// MCP servers configured in the Claude desktop app, if any. Values stay on
-/// this PC: they're only copied into Claude Code's own settings.
-pub fn desktop_servers() -> Vec<(String, serde_json::Value)> {
-    let path = if let Some(a) = std::env::var_os("APPDATA") {
-        PathBuf::from(a).join("Claude").join("claude_desktop_config.json")
+fn desktop_dir() -> PathBuf {
+    if let Some(a) = std::env::var_os("APPDATA") {
+        PathBuf::from(a).join("Claude")
     } else {
-        sys::home().join("Library/Application Support/Claude/claude_desktop_config.json")
+        sys::home().join("Library/Application Support/Claude")
+    }
+}
+
+/// MCP servers the Claude desktop app has: entries in claude_desktop_config.json
+/// plus installed desktop extensions (Settings > Extensions/Connectors).
+/// Values stay on this PC: they're only copied into Claude Code's settings.
+pub fn desktop_servers() -> Vec<(String, serde_json::Value)> {
+    let dir = desktop_dir();
+    let mut out: Vec<(String, serde_json::Value)> = std::fs::read_to_string(dir.join("claude_desktop_config.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["mcpServers"].as_object().cloned())
+        .map(|m| m.into_iter().collect())
+        .unwrap_or_default();
+    out.extend(desktop_extensions(&dir));
+    out
+}
+
+/// Installed desktop extensions (.mcpb/.dxt), turned into stdio entries that
+/// Claude Code can run: the manifest's mcp_config with its placeholders filled.
+fn desktop_extensions(dir: &Path) -> Vec<(String, serde_json::Value)> {
+    let Ok(rd) = std::fs::read_dir(dir.join("Claude Extensions")) else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let ext_dir = e.path();
+        let id = e.file_name().to_string_lossy().to_string();
+        let Ok(text) = std::fs::read_to_string(ext_dir.join("manifest.json")) else { continue };
+        let Ok(m) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let settings: serde_json::Value = std::fs::read_to_string(
+            dir.join("Claude Extensions Settings").join(format!("{id}.json")),
+        )
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+        if settings["isEnabled"].as_bool() == Some(false) {
+            continue;
+        }
+        if let Some(entry) = extension_entry(&m, &ext_dir, &settings["userConfig"]) {
+            let name = m["name"].as_str().or(m["display_name"].as_str()).unwrap_or(&id).to_string();
+            out.push((format!("{name} ({id})"), entry));
+        }
+    }
+    out
+}
+
+fn extension_entry(m: &serde_json::Value, ext_dir: &Path, user: &serde_json::Value) -> Option<serde_json::Value> {
+    let cfg = &m["server"]["mcp_config"];
+    let command = cfg["command"].as_str()?;
+    let home = sys::home();
+    let fill = |s: &str| -> String {
+        let mut r = s
+            .replace("${__dirname}", &ext_dir.display().to_string())
+            .replace("${HOME}", &home.display().to_string())
+            .replace("${DESKTOP}", &home.join("Desktop").display().to_string())
+            .replace("${DOCUMENTS}", &home.join("Documents").display().to_string())
+            .replace("${DOWNLOADS}", &home.join("Downloads").display().to_string())
+            .replace("${pathSeparator}", std::path::MAIN_SEPARATOR_STR)
+            .replace("${/}", std::path::MAIN_SEPARATOR_STR);
+        // ${user_config.key}: the saved value, else the manifest's default.
+        while let Some(start) = r.find("${user_config.") {
+            let Some(len) = r[start..].find('}') else { break };
+            let key = &r[start + 14..start + len];
+            let val = user.get(key).cloned().unwrap_or_else(|| m["user_config"][key]["default"].clone());
+            let v = match val {
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            r.replace_range(start..start + len + 1, &v);
+        }
+        r
     };
-    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
-    v["mcpServers"]
+    let args: Vec<String> = cfg["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str()).map(fill).collect();
+    let env: serde_json::Map<String, serde_json::Value> = cfg["env"]
         .as_object()
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), serde_json::Value::String(fill(s)))))
+        .collect();
+    let mut entry = serde_json::json!({"type": "stdio", "command": fill(command), "args": args});
+    if !env.is_empty() {
+        entry["env"] = serde_json::Value::Object(env);
+    }
+    Some(entry)
 }
 
 /// Ask an HTTP MCP endpoint to initialize; true if it answers like one.
@@ -259,6 +334,18 @@ mod tests {
         assert_eq!(s[2].health, "needs_auth");
         assert_eq!(s[3].health, "pending");
         assert_eq!(s[1].detail, "Failed to connect");
+    }
+
+    #[test]
+    fn turns_desktop_extensions_into_entries() {
+        let m: serde_json::Value = serde_json::from_str(r#"{"name":"blender-mcp","server":{"type":"python",
+            "mcp_config":{"command":"uvx","args":["${__dirname}/server.py","--port","${user_config.port}"],
+            "env":{"BLENDER_HOST":"${user_config.host}"}}},
+            "user_config":{"port":{"default":9876},"host":{"default":"localhost"}}}"#).unwrap();
+        let e = extension_entry(&m, Path::new("/ext/b"), &serde_json::json!({"host": "127.0.0.1"})).unwrap();
+        assert_eq!(e["command"], "uvx");
+        assert_eq!(e["args"], serde_json::json!(["/ext/b/server.py", "--port", "9876"]));
+        assert_eq!(e["env"]["BLENDER_HOST"], "127.0.0.1");
     }
 
     #[test]
