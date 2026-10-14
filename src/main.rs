@@ -62,6 +62,8 @@ struct App {
     planner: blueprint::Planner,
     /// The apps we paused this PC's model for (empty = not paused by us).
     paused_for: Mutex<Vec<&'static str>>,
+    /// Started by hand while an app was open: don't pause it until they all close.
+    keep_running: AtomicBool,
 }
 
 impl App {
@@ -159,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         apps: Mutex::new(Vec::new()),
         planner: blueprint::Planner::default(),
         paused_for: Mutex::new(Vec::new()),
+        keep_running: AtomicBool::new(false),
     });
     tracing::info!(target: "router", "PoolParty Router {} starting (settings: {})",
         env!("CARGO_PKG_VERSION"), cfg_path.display());
@@ -260,6 +263,15 @@ fn spawn_ticker(app: Shared) {
             events().send("tick", live_state(&app));
         }
     });
+}
+
+/// "A", "A and B", "A, B and C"
+fn names(list: &[&str]) -> String {
+    match list {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 fn claude_summary(app: &App) -> Value {
@@ -487,6 +499,12 @@ async fn model_start(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(
     if let Err(r) = control_ok(&app, &headers, peer) {
         return r;
     }
+    let open: Vec<&'static str> = app.apps.lock().unwrap().iter().filter(|a| a.running).map(|a| a.name).collect();
+    if !open.is_empty() {
+        app.keep_running.store(true, Ordering::Relaxed);
+        app.paused_for.lock().unwrap().clear();
+        tracing::info!(target: "router", "started by hand while {} {} open; it keeps running until they close", names(&open), if open.len() > 1 { "are" } else { "is" });
+    }
     match app.model.start(&app.cfg().local_model).await {
         Ok(()) => ok(json!({"model": app.model.status()})),
         Err(e) => error(StatusCode::BAD_REQUEST, e),
@@ -498,6 +516,9 @@ async fn model_stop(State(app): State<Shared>, headers: HeaderMap, ConnectInfo(p
         return r;
     }
     app.model.stop().await;
+    // Stopped by hand: don't restart it on our own when the apps close.
+    app.keep_running.store(false, Ordering::Relaxed);
+    app.paused_for.lock().unwrap().clear();
     let cfg = app.cfg();
     app.nodes.refresh(&app.http, &cfg).await;
     ok(json!({"model": app.model.status()}))
@@ -1119,9 +1140,14 @@ fn spawn_apps_watch(app: Shared) {
 
             if cfg.local_model.pause_for_apps && cfg.nodes.local.url.is_empty() {
                 let paused = !app.paused_for.lock().unwrap().is_empty();
-                if !running.is_empty() && !paused && app.model.is_active() {
+                if running.is_empty() {
+                    app.keep_running.store(false, Ordering::Relaxed);
+                }
+                if app.keep_running.load(Ordering::Relaxed) {
+                    // the person chose to run it alongside the apps
+                } else if !running.is_empty() && !paused && app.model.is_active() {
                     tracing::info!(target: "router", "{} {} open, so this PC's model is paused to give it the whole GPU",
-                        running.join(" and "), if running.len() > 1 { "are" } else { "is" });
+                        names(&running), if running.len() > 1 { "are" } else { "is" });
                     app.model.stop().await;
                     *app.paused_for.lock().unwrap() = running.clone();
                 } else if running.is_empty() && paused {

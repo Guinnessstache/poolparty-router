@@ -431,7 +431,8 @@ function localState(L) {
   const m = L.model || {}, node = nodesOf(L).local || {};
   const ext = S.setup?.local?.external_url;
   const pf = L.model_paused_for || [];
-  if (pf.length && !ext) return ["off", `Paused while ${pf.join(" and ")} ${pf.length > 1 ? "are" : "is"} open`, "The model starts again on its own when they close, so the apps get the whole GPU."];
+  const list = pf.length > 1 ? pf.slice(0, -1).join(", ") + " and " + pf[pf.length - 1] : pf[0];
+  if (pf.length && !ext && m.state !== "running" && m.state !== "loading") return ["off", `Paused while ${list} ${pf.length > 1 ? "are" : "is"} open`, "It starts again on its own when they close, so the apps get the whole GPU. Press Start to run it anyway."];
   if (ext) return node.online ? ["good", "Ready", node.model] : ["bad", "Can't reach " + ext, node.last_error];
   switch (m.state) {
     case "not_set_up": return ["off", "Choose a model to get started", null];
