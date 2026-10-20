@@ -59,15 +59,24 @@ status light for each showing whether it's connected to Claude.
 
 ### Setting up a Mac Studio as the remote machine
 
-On the Mac: `brew install llama.cpp`, copy the `mac` folder from the zip over, and run
+On the Mac: `brew install llama.cpp`, put the model in `~/models` (not Desktop,
+Documents or Downloads: macOS won't let background apps read those), copy the
+`mac` folder from the zip over, and run
 
 ```bash
-./mac/setup-mac.sh ~/models/<your-model>.gguf
+bash mac/setup-mac.sh ~/models/<your-model>.gguf
 ```
 
 It raises macOS's GPU memory limit (to 112 GB on a 128 GB Mac) at every boot,
-starts `llama-server` at login with a password, and prints the address and
-password to type into the app. `mac/uninstall-mac.sh` undoes it.
+starts `llama-server` at login with a password, waits for the model to load and
+prints the address and password to type into the app. If the server doesn't come
+up, it shows the end of the log and what to do about it. `bash mac/uninstall-mac.sh`
+undoes it.
+
+If you see `set: pipefail: invalid option name` or `$'\r': command not found`,
+your copy of the `mac` folder has Windows line endings (from release zips before
+0.5.10, or a copy taken from a Windows checkout). Fix it in place with
+`sed -i '' $'s/\r$//' mac/*.sh mac/*.plist` and run the setup again.
 
 ## Planning a feature
 

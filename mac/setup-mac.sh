@@ -24,6 +24,25 @@ if [[ "$MODEL" == *['&|<>']* ]]; then
   exit 1
 fi
 MODEL="$(cd "$(dirname "$MODEL")" && pwd)/$(basename "$MODEL")"   # absolute
+
+# llama-server runs in the background from launchd, which doesn't get the
+# Files & Folders permission Terminal has. Models in these folders can't be
+# opened from there ("Operation not permitted") and the server never starts.
+case "$MODEL" in
+  /Volumes/*)
+    echo "Note: the model is on an external drive. If the server doesn't start,"
+    echo "macOS may be blocking background access to it; copy it to ~/models instead."
+    ;;
+  "$HOME/Desktop/"*|"$HOME/Documents/"*|"$HOME/Downloads/"*|"$HOME/Library/Mobile Documents/"*)
+    echo "The model is in $(dirname "$MODEL"), which background apps on macOS"
+    echo "aren't allowed to read. Move it somewhere like ~/models and run this again:"
+    echo
+    echo "  mkdir -p ~/models && mv \"$(dirname "$MODEL")\"/$(basename "${MODEL%-00001-of-*}")* ~/models/"
+    echo "  bash \"$0\" ~/models/$(basename "$MODEL")"
+    exit 1
+    ;;
+esac
+
 LLAMA="$(command -v llama-server || true)"
 if [[ -z "$LLAMA" ]]; then
   echo "llama-server not found. Install it with:  brew install llama.cpp"
@@ -55,12 +74,60 @@ sed -e "s|__LLAMA__|$LLAMA|" -e "s|__MODEL__|$MODEL|" -e "s|__PORT__|$PORT|" \
     -e "s|__CTX__|$CTX|" -e "s|__KEY__|$KEY|" -e "s|__HOME__|$HOME|" \
     "$HERE/com.poolparty.llama-server.plist" > "$AGENT"
 chmod 600 "$AGENT"   # it contains the API key
-launchctl bootout "gui/$(id -u)" "$AGENT" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$AGENT"
+DOMAIN="gui/$(id -u)"
+SERVICE="$DOMAIN/com.poolparty.llama-server"
+LOG="$HOME/Library/Logs/poolparty-llama-server.log"
+# bootout returns before the old copy is gone; bootstrapping too soon fails
+# with "Bootstrap failed: 5: Input/output error" when re-running this script.
+launchctl bootout "$SERVICE" 2>/dev/null || true
+for _ in $(seq 1 30); do launchctl print "$SERVICE" >/dev/null 2>&1 || break; sleep 1; done
 
+HOLDER="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1" (pid "$2")"}' || true)"
+if [[ -n "$HOLDER" ]]; then
+  echo "Port $PORT is already in use by $HOLDER. Quit it (or run with PORT=8081) and try again."
+  exit 1
+fi
+
+: > "$LOG"   # fresh log, so what's shown below is from this start
+launchctl bootstrap "$DOMAIN" "$AGENT"
+
+# Wait for the model to load (large models can take a few minutes) and say
+# plainly whether it worked, instead of leaving it to the log.
 echo
-echo "llama-server is starting (large models take a minute to load)."
-echo "Log:   tail -f ~/Library/Logs/poolparty-llama-server.log"
+echo "Starting llama-server and loading the model..."
+STARTED=0
+for i in $(seq 1 120); do                      # up to 6 minutes
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health" || true)"
+  if [[ "$CODE" == "200" ]]; then STARTED=1; break; fi
+  if ! pgrep -qf "$LLAMA.*--port $PORT"; then
+    sleep 2
+    pgrep -qf "$LLAMA.*--port $PORT" || break   # exited; launchd retries in 60 s
+  fi
+  (( i % 10 == 0 )) && echo "  still loading ($((i * 3)) s)..."
+  sleep 3
+done
+
+if [[ "$STARTED" != 1 ]]; then
+  echo
+  echo "llama-server did not come up. Last lines of its log:"
+  echo "------------------------------------------------------------"
+  tail -n 25 "$LOG" 2>/dev/null || echo "(no log written: $LOG)"
+  echo "------------------------------------------------------------"
+  if grep -q "Operation not permitted" "$LOG" 2>/dev/null; then
+    echo "macOS blocked access to the model file. Move it to ~/models and run this again."
+  elif grep -qiE "unknown model architecture|failed to load model|error loading model" "$LOG" 2>/dev/null; then
+    echo "This llama.cpp can't load that model. Try:  brew upgrade llama.cpp  then run this again."
+  elif grep -qiE "out of memory|failed to allocate|insufficient memory" "$LOG" 2>/dev/null; then
+    echo "Not enough GPU memory. Try a smaller context:  CTX=32768 bash \"$0\" \"$MODEL\""
+  elif grep -qiE "address already in use|couldn't bind" "$LOG" 2>/dev/null; then
+    echo "Port $PORT is taken. Run with another port:  PORT=8081 bash \"$0\" \"$MODEL\""
+  fi
+  echo "launchd will keep retrying every minute. Full log: tail -f $LOG"
+  exit 1
+fi
+
+echo "llama-server is running."
+echo "Log:   tail -f $LOG"
 echo "Check: curl -s -H 'Authorization: Bearer $KEY' http://localhost:$PORT/v1/models"
 echo
 echo "Now, in PoolParty Router on your PC: Mac Studio -> Set up, then enter"

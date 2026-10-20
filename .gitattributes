@@ -1,0 +1,4 @@
+# The Mac files are packaged by the Windows build, where Git converts text to
+# CRLF by default. bash can't run a script with CRLF line endings, so keep these LF.
+*.sh    text eol=lf
+*.plist text eol=lf
