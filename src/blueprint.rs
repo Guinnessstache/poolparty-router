@@ -154,6 +154,19 @@ impl Planner {
         Ok(())
     }
 
+    /// A step that updates in place ("Writing the blueprint (1,200 words)")
+    /// instead of adding a line per update. Logged only when it first appears.
+    fn live_step(&self, s: String) {
+        let mut j = self.job.lock().unwrap();
+        let key = |t: &str| t.split(" (").next().unwrap_or("").to_string();
+        if j.steps.last().is_some_and(|l| key(l) == key(&s)) {
+            *j.steps.last_mut().unwrap() = s;
+            return;
+        }
+        drop(j);
+        self.step(s);
+    }
+
     fn step(&self, s: String) {
         tracing::info!(target: "claude", "{s}");
         let mut j = self.job.lock().unwrap();
@@ -182,6 +195,7 @@ impl Planner {
             "--output-format",
             "stream-json",
             "--verbose",
+            "--include-partial-messages",
             "--tools",
             "Read,Glob,Grep,WebSearch,WebFetch",
             "--disallowedTools",
@@ -228,6 +242,14 @@ impl Planner {
         let mut result: Option<String> = None;
         let mut is_error = false;
         let mut cost: Option<f64> = None;
+        // Progress while Claude thinks or writes (no tool calls happen then, so
+        // without this the log looks frozen for minutes).
+        // character counts; ~6 characters per English word
+        let (mut words, mut thought, mut last_shown) = (0usize, 0usize, Instant::now());
+        let started = Instant::now();
+        // With partial messages there's output every few seconds; this much
+        // silence means Claude Code is hung, not working.
+        const QUIET_LIMIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
         loop {
             tokio::select! {
                 _ = &mut cancel => {
@@ -235,10 +257,33 @@ impl Planner {
                     let _ = std::fs::remove_file(&prompt_file);
                     return Err("cancelled".into());
                 }
+                _ = tokio::time::sleep(QUIET_LIMIT) => {
+                    let _ = child.kill().await;
+                    let _ = std::fs::remove_file(&prompt_file);
+                    return Err("Claude Code stopped responding for 10 minutes, so the router stopped it. Try again; if it keeps happening, run claude in a terminal to check it works.".into());
+                }
                 line = lines.next_line() => {
                     let Ok(Some(line)) = line else { break };
                     let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
                     match v["type"].as_str() {
+                        Some("stream_event") => {
+                            let d = &v["event"]["delta"];
+                            match d["type"].as_str() {
+                                Some("text_delta") => words += d["text"].as_str().unwrap_or("").chars().count(),
+                                Some("thinking_delta") => thought += d["thinking"].as_str().unwrap_or("").chars().count(),
+                                _ => continue,
+                            }
+                            if last_shown.elapsed().as_secs() >= 2 {
+                                last_shown = Instant::now();
+                                let mins = started.elapsed().as_secs() / 60;
+                                let when = if mins > 0 { format!(", {mins} min in") } else { String::new() };
+                                if d["type"] == "text_delta" {
+                                    self.live_step(format!("Writing the blueprint (~{} words{when})", words / 6));
+                                } else {
+                                    self.live_step(format!("Thinking it through (~{} words{when})", thought / 6));
+                                }
+                            }
+                        }
                         Some("assistant") => {
                             for c in v["message"]["content"].as_array().into_iter().flatten() {
                                 if c["type"] == "tool_use" {

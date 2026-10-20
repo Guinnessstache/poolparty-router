@@ -41,6 +41,7 @@ button, input, select { font: inherit; color: inherit; }
 .light.good { background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 22%, transparent); }
 .light.wait { background: var(--wait); box-shadow: 0 0 0 4px color-mix(in srgb, var(--wait) 25%, transparent); animation: breathe 1.4s ease-in-out infinite; }
 .light.bad { background: var(--bad); box-shadow: 0 0 0 4px color-mix(in srgb, var(--bad) 22%, transparent); }
+.light.busy { background: var(--pool); box-shadow: 0 0 0 4px color-mix(in srgb, var(--pool) 22%, transparent); }
 @keyframes breathe { 50% { opacity: .45; } }
 
 .btn { border: 1.5px solid var(--line); background: var(--panel); border-radius: 999px; padding: 7px 16px; cursor: pointer; font-weight: 600; font-size: 14px; white-space: nowrap; }
@@ -423,7 +424,8 @@ async function api(path, body) {
   return j;
 }
 function setLight(el, s) { el.className = "light " + s; }
-const LIGHT_FILL = { good: "var(--good)", wait: "var(--wait)", bad: "var(--bad)", off: "var(--off)" };
+// "busy": this PC is fine, its GPU is lent to Unreal/Unity/Blender so the model is paused on purpose.
+const LIGHT_FILL = { good: "var(--good)", wait: "var(--wait)", bad: "var(--bad)", busy: "var(--pool)", off: "var(--off)" };
 
 // ------------------------------------------------------------ plain-English status
 function nodesOf(L) { return Object.fromEntries((L.nodes || []).map(n => [n.id, n])); }
@@ -432,7 +434,7 @@ function localState(L) {
   const ext = S.setup?.local?.external_url;
   const pf = L.model_paused_for || [];
   const list = pf.length > 1 ? pf.slice(0, -1).join(", ") + " and " + pf[pf.length - 1] : pf[0];
-  if (pf.length && !ext && m.state !== "running" && m.state !== "loading") return ["off", `Paused while ${list} ${pf.length > 1 ? "are" : "is"} open`, "It starts again on its own when they close, so the apps get the whole GPU. Press Start to run it anyway."];
+  if (pf.length && !ext && m.state !== "running" && m.state !== "loading") return ["busy", `Model paused: ${list} ${pf.length > 1 ? "are" : "is"} using the GPU`, "It starts again on its own when they close, so the apps get the whole GPU. Press Start to run it anyway."];
   if (ext) return node.online ? ["good", "Ready", node.model] : ["bad", "Can't reach " + ext, node.last_error];
   switch (m.state) {
     case "not_set_up": return ["off", "Choose a model to get started", null];
@@ -468,6 +470,7 @@ function overall(L) {
   if (ls === "bad") return ["bad", "This PC's model stopped. The details are below; press Start again when ready."];
   if (rn.configured && rs === "bad") return ["bad", `${rname} isn't reachable, so coding agents can't run. Chat still works on this PC.`];
   if (ls === "wait") return ["wait", "Loading the model. The first time takes a minute."];
+  if (ls === "busy") return [rn.configured ? "good" : "busy", rn.configured ? `Working through ${rname} while your apps use this PC's GPU.` : "Your apps have this PC's GPU, so its model is paused until they close."];
   if (ls === "off" && !rn.configured) return ["wait", "This PC's model isn't running. Press Start."];
   if (ls === "off") return ["good", `Working through ${rname}. This PC's model is off, so tab completion is off too.`];
   return ["good", rn.configured ? "Everything's working. Both machines are online." : "Everything's working on this PC."];
@@ -533,7 +536,7 @@ function renderLive(L) {
     $("fs-" + id).textContent = up ? b : "";
     $("cc-" + id).setAttribute("class", "channel-core" + (up ? (tr[id]?.in_flight || tr[id]?.tokens_per_sec ? " live" : "") : " off"));
   }
-  $("cc-gpu").setAttribute("class", "channel-core" + (loc[0] === "good" ? (tr.local?.tokens_per_sec ? " live" : "") : " off"));
+  $("cc-gpu").setAttribute("class", "channel-core" + (loc[0] === "busy" ? " live" : loc[0] === "good" ? (tr.local?.tokens_per_sec ? " live" : "") : " off"));
   $("f-claude").textContent = planning ? "planning" : (tr.claude?.requests ? `${tr.claude.requests} handed off` : "");
 
   const g = L.gpu;
