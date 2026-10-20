@@ -43,6 +43,11 @@ static SUCCESS: LazyLock<Regex> = LazyLock::new(|| {
 static ZERO_FAIL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b0 (failed|failures?|errors?|error\(s\))(\W|$)").unwrap());
 
+/// A line that's only an exit code ("Exit code 1:"), which agents like
+/// OpenCode print above a failed command's output. It says nothing about
+/// *what* failed: grep with no matches and a broken build both print it.
+static BARE_EXIT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\W*(process )?exit(ed)? (with )?(code|status):? *-?\d+\W*$").unwrap());
 static PATHISH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\w.~:-]*[/\\][\w./\\:-]+").unwrap());
 static DIGITS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+").unwrap());
 
@@ -207,13 +212,37 @@ pub fn error_signature(text: &str) -> Option<String> {
 
 /// The first real error line, as written and as a fingerprint.
 fn error_line(text: &str) -> Option<(String, String)> {
-    let line = ERROR_LINE
+    let mut bare_exit = None;
+    let found = ERROR_LINE
         .find_iter(text)
         .map(|m| m.as_str().trim())
-        .find(|l| !ZERO_FAIL.is_match(l))?;
-    let s = PATHISH.replace_all(line, "<path>");
+        .filter(|l| !ZERO_FAIL.is_match(l))
+        .find(|l| {
+            if BARE_EXIT.is_match(l) {
+                bare_exit.get_or_insert(*l);
+                false
+            } else {
+                true
+            }
+        });
+    let line = match (found, bare_exit) {
+        (Some(l), _) => l.to_string(),
+        // Only an exit code: the failure is whatever the command printed last
+        // (that's where tools put the reason). No output at all, like grep
+        // finding nothing, isn't an error worth counting.
+        (None, Some(exit)) => {
+            let detail = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !BARE_EXIT.is_match(l))
+                .last()?;
+            format!("{} {detail}", exit.trim_end_matches(':'))
+        }
+        (None, None) => return None,
+    };
+    let s = PATHISH.replace_all(&line, "<path>");
     let s = DIGITS.replace_all(&s, "#");
-    Some((line.to_string(), truncate(&s.to_lowercase(), 160)))
+    Some((line.clone(), truncate(&s.to_lowercase(), 160)))
 }
 
 pub fn content_text(v: &Value) -> String {
@@ -277,6 +306,30 @@ mod tests {
         assert!(error_signature("Build succeeded. 0 warnings").is_none());
         assert!(error_signature("test result: ok. 12 passed; 0 failed; 0 ignored").is_none());
         assert!(error_signature("Tests: 3 failed, 9 passed").is_some());
+    }
+
+    #[test]
+    fn bare_exit_codes_are_not_all_the_same_error() {
+        // OpenCode prints "Exit code 1:" above the output of any failed command.
+        assert!(error_signature("Exit code 1:\n").is_none()); // e.g. grep found nothing
+        let a = error_signature("Exit code 1:\nls: cannot access 'Gen/x.py': No such file or directory").unwrap();
+        let b = error_signature("Exit code 1:\nModuleNotFoundError: No module named 'bpy'").unwrap();
+        assert_ne!(a, b);
+        // A real error line still wins over the bare exit code.
+        let c = error_signature("Exit code 2:\nsrc/a.rs:3:1: error[E0425]: cannot find value `x`\nmore").unwrap();
+        assert!(c.contains("e#"), "{c}");
+
+        let mut s = Session::new("t");
+        let mut msgs = vec![json!({"role": "user", "content": "build it"})];
+        for (i, out) in ["Exit code 1:", "Exit code 1:\nnope: not found", "Exit code 1:\nNo such file: a.txt", "Exit code 1:"]
+            .iter()
+            .enumerate()
+        {
+            msgs.push(call(&format!("c{i}"), "bash", &format!("{{\"command\":\"cmd{i}\"}}")));
+            msgs.push(result(&format!("c{i}"), out));
+            s.observe(&msgs);
+        }
+        assert_eq!(s.strikes, 0, "{:?}", s.reasons);
     }
 
     #[test]
